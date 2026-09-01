@@ -19,6 +19,8 @@ htmlcov/
 
 # Generated output
 parsed_resumes.json
+*.db
+*.sqlite3
 
 # Environment / secrets
 .env

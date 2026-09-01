@@ -6,6 +6,7 @@ import os
 from pydantic import ValidationError
 from pydparser import ResumeParser
 
+import db
 from models import ParsedResume
 
 
@@ -58,9 +59,16 @@ def parse_resumes(folder_path: str) -> list[ParsedResume]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Parse resumes in a folder to JSON.")
+    parser = argparse.ArgumentParser(
+        description="Parse resumes in a folder to JSON and SQLite."
+    )
     parser.add_argument(
         "folder_path", help="Path to the folder containing PDF/DOCX resumes"
+    )
+    parser.add_argument(
+        "--db",
+        default=db.DEFAULT_DB_PATH,
+        help=f"Path to the SQLite database file (default: {db.DEFAULT_DB_PATH})",
     )
     args = parser.parse_args()
 
@@ -68,7 +76,15 @@ def main():
     output = [item.model_dump() for item in parsed]
     with open("parsed_resumes.json", "w") as f:
         json.dump(output, f, indent=2)
+
+    conn = db.get_connection(args.db)
+    try:
+        db.save_resumes(conn, parsed)
+    finally:
+        conn.close()
+
     print(f"Parsed {len(parsed)} resume(s) and wrote parsed_resumes.json")
+    print(f"Stored {len(parsed)} resume(s) in {args.db}")
 
 
 if __name__ == "__main__":
