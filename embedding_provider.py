@@ -41,6 +41,11 @@ class OpenRouterEmbeddingProvider:
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
+        empty_indexes = [index for index, text in enumerate(texts) if not text]
+        if empty_indexes:
+            raise RuntimeError(
+                f"Refusing to embed empty string(s) at input index(es) {empty_indexes}"
+            )
         response = self._client.post(
             f"{self.base_url}/embeddings",
             headers={
