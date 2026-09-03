@@ -158,10 +158,16 @@ def _row_to_record(row: sqlite3.Row) -> dict:
 
 def get_all_resumes(conn: sqlite3.Connection) -> list[dict]:
     """Return every stored resume (parsed fields + file metadata, no blob)."""
-    rows = conn.execute(
-        f"SELECT {_SELECT_COLUMNS} FROM resumes ORDER BY id"
-    ).fetchall()
+    rows = conn.execute(f"SELECT {_SELECT_COLUMNS} FROM resumes ORDER BY id").fetchall()
     return [_row_to_record(row) for row in rows]
+
+
+def get_resume(conn: sqlite3.Connection, resume_id: int) -> dict | None:
+    """Return one stored resume by id (parsed fields + file metadata, no blob)."""
+    row = conn.execute(
+        f"SELECT {_SELECT_COLUMNS} FROM resumes WHERE id = ?", (resume_id,)
+    ).fetchone()
+    return _row_to_record(row) if row is not None else None
 
 
 def get_resume_file(conn: sqlite3.Connection, resume_id: int) -> bytes | None:

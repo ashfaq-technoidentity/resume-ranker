@@ -4,6 +4,7 @@ from pathlib import Path
 from db import (
     get_all_resumes,
     get_connection,
+    get_resume,
     get_resume_file,
     save_resume,
     save_resumes,
@@ -84,6 +85,25 @@ def test_get_resume_file(tmp_path):
         assert get_resume_file(conn, resume_id + 100) is None
     finally:
         conn.close()
+
+
+def test_get_resume(tmp_path):
+    file_path, _ = _write_resume_file(tmp_path)
+
+    conn = get_connection(str(tmp_path / "resumes.db"))
+    try:
+        resume_id = save_resume(conn, _make_resume(file_path))
+        record = get_resume(conn, resume_id)
+        missing = get_resume(conn, resume_id + 100)
+    finally:
+        conn.close()
+
+    assert record is not None
+    assert record["id"] == resume_id
+    assert record["name"] == "Jane Doe"
+    assert record["skills"] == ["Python", "SQL"]
+    assert "file_blob" not in record
+    assert missing is None
 
 
 def test_upsert_same_file_updates_row(tmp_path):
