@@ -1,9 +1,12 @@
 """SQLite storage for parsed resumes.
 
 Each row stores the parsed fields from :class:`models.ParsedResume` together
-with the resume file itself (as a BLOB). Rows are keyed by the SHA-256 hash of
-the file content, so re-parsing an unchanged file updates its row instead of
-duplicating it.
+with the resume file itself (as a BLOB) and the full extracted text (used for
+keyword search). Rows are keyed by the SHA-256 hash of the file content, so
+re-parsing an unchanged file updates its row instead of duplicating it.
+
+The extracted text is also indexed in an FTS5 virtual table (``resumes_fts``,
+rowid = ``resumes.id``) for fast keyword shortlisting.
 """
 
 import hashlib
@@ -42,6 +45,7 @@ CREATE TABLE IF NOT EXISTS resumes (
     college_name TEXT NOT NULL DEFAULT '[]',
     total_experience REAL,
     no_of_pages INTEGER,
+    resume_text TEXT,
     raw TEXT NOT NULL DEFAULT '{}',
     error TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -49,13 +53,17 @@ CREATE TABLE IF NOT EXISTS resumes (
 )
 """
 
+_FTS_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS resumes_fts USING fts5(resume_text)
+"""
+
 _INSERT_SQL = """
 INSERT INTO resumes (
     file_path, file_name, file_ext, file_size, file_hash, file_blob,
     name, email, mobile_number, skills, degree, designation,
     company_names, college_name, total_experience, no_of_pages,
-    raw, error
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    resume_text, raw, error
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(file_hash) DO UPDATE SET
     file_path = excluded.file_path,
     file_name = excluded.file_name,
@@ -72,6 +80,7 @@ ON CONFLICT(file_hash) DO UPDATE SET
     college_name = excluded.college_name,
     total_experience = excluded.total_experience,
     no_of_pages = excluded.no_of_pages,
+    resume_text = excluded.resume_text,
     raw = excluded.raw,
     error = excluded.error,
     updated_at = datetime('now')
@@ -81,8 +90,15 @@ _SELECT_COLUMNS = """
     id, file_path, file_name, file_ext, file_size, file_hash,
     name, email, mobile_number, skills, degree, designation,
     company_names, college_name, total_experience, no_of_pages,
-    raw, error, created_at, updated_at
+    resume_text, raw, error, created_at, updated_at
 """
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add the resume_text column to databases created before it existed."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(resumes)")}
+    if "resume_text" not in columns:
+        conn.execute("ALTER TABLE resumes ADD COLUMN resume_text TEXT")
 
 
 def get_connection(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
@@ -90,6 +106,8 @@ def get_connection(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute(_SCHEMA)
+    _migrate(conn)
+    conn.execute(_FTS_SCHEMA)
     conn.commit()
     return conn
 
@@ -101,6 +119,16 @@ def _read_file(file_path: str) -> tuple[bytes | None, int | None, str | None]:
     except OSError:
         return None, None, None
     return blob, len(blob), hashlib.sha256(blob).hexdigest()
+
+
+def _sync_fts(conn: sqlite3.Connection, resume_id: int, text: str | None) -> None:
+    """Mirror one resume's text into the FTS index (empty text removes the row)."""
+    conn.execute("DELETE FROM resumes_fts WHERE rowid = ?", (resume_id,))
+    if text:
+        conn.execute(
+            "INSERT INTO resumes_fts (rowid, resume_text) VALUES (?, ?)",
+            (resume_id, text),
+        )
 
 
 def save_resume(conn: sqlite3.Connection, resume: ParsedResume) -> int:
@@ -129,16 +157,20 @@ def save_resume(conn: sqlite3.Connection, resume: ParsedResume) -> int:
             json.dumps(resume.college_name),
             resume.total_experience,
             resume.no_of_pages,
+            resume.resume_text,
             json.dumps(resume.raw, default=str),
             resume.error,
         ),
     )
     if file_hash is None:
-        return cur.lastrowid
-    row = conn.execute(
-        "SELECT id FROM resumes WHERE file_hash = ?", (file_hash,)
-    ).fetchone()
-    return row["id"]
+        resume_id = cur.lastrowid
+    else:
+        row = conn.execute(
+            "SELECT id FROM resumes WHERE file_hash = ?", (file_hash,)
+        ).fetchone()
+        resume_id = row["id"]
+    _sync_fts(conn, resume_id, resume.resume_text)
+    return resume_id
 
 
 def save_resumes(conn: sqlite3.Connection, resumes: list[ParsedResume]) -> list[int]:
@@ -146,6 +178,23 @@ def save_resumes(conn: sqlite3.Connection, resumes: list[ParsedResume]) -> list[
     ids = [save_resume(conn, resume) for resume in resumes]
     conn.commit()
     return ids
+
+
+def update_resume_text(
+    conn: sqlite3.Connection, resume_id: int, text: str | None
+) -> bool:
+    """Set the extracted text for one stored resume and refresh its FTS row.
+
+    Returns True if the resume exists and was updated, False otherwise.
+    """
+    cur = conn.execute(
+        "UPDATE resumes SET resume_text = ?, updated_at = datetime('now') WHERE id = ?",
+        (text, resume_id),
+    )
+    if cur.rowcount == 0:
+        return False
+    _sync_fts(conn, resume_id, text)
+    return True
 
 
 def _row_to_record(row: sqlite3.Row) -> dict:

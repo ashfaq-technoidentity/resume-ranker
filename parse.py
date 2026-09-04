@@ -5,9 +5,28 @@ import os
 
 from pydantic import ValidationError
 from pydparser import ResumeParser
+from pydparser import utils as parser_utils
 
 import db
 from models import ParsedResume
+
+_TEXT_EXTRACT_EXTENSIONS = (".pdf", ".docx", ".doc")
+
+
+def extract_resume_text(file_path: str) -> str | None:
+    """Extract the full plain text of a resume file, or None on failure.
+
+    Uses the same extraction functions as the parser itself, so the stored
+    text matches what pydparser saw when it parsed the file.
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext not in _TEXT_EXTRACT_EXTENSIONS:
+        return None
+    try:
+        text = parser_utils.extract_text(file_path, ext)
+    except Exception:  # noqa: BLE001 - fail-soft: text extraction must never break parsing
+        return None
+    return text or None
 
 
 def parse_resume(file_path: str) -> dict:
@@ -16,6 +35,7 @@ def parse_resume(file_path: str) -> dict:
     except Exception as e:  # noqa: BLE001 - fail-soft: any parser failure becomes an error record
         return {"file_path": file_path, "error": str(e)}
     data["file_path"] = file_path
+    data["resume_text"] = extract_resume_text(file_path)
     return data
 
 
@@ -39,12 +59,14 @@ def _to_parsed_resume(data: dict) -> ParsedResume:
             college_name=data.get("college_name") or [],
             total_experience=data.get("total_experience"),
             no_of_pages=data.get("no_of_pages"),
+            resume_text=data.get("resume_text"),
             raw=data,
         )
     except ValidationError as e:
         return ParsedResume(
             file_path=data.get("file_path", ""),
             error=str(e),
+            resume_text=data.get("resume_text"),
             raw=data,
         )
 

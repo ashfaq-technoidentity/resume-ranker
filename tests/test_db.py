@@ -1,4 +1,5 @@
 import hashlib
+import sqlite3
 from pathlib import Path
 
 from db import (
@@ -8,12 +9,39 @@ from db import (
     get_resume_file,
     save_resume,
     save_resumes,
+    update_resume_text,
 )
 from models import ParsedResume
 from parse import _to_parsed_resume, parse_resume
 
 SAMPLES_DIR = Path(__file__).parent.parent / "sample_resumes"
 GOOD_RESUME = SAMPLES_DIR / "omkar_pathak.docx"
+
+_LEGACY_SCHEMA = """
+CREATE TABLE resumes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_path TEXT NOT NULL,
+    file_name TEXT,
+    file_ext TEXT,
+    file_size INTEGER,
+    file_hash TEXT UNIQUE,
+    file_blob BLOB,
+    name TEXT,
+    email TEXT,
+    mobile_number TEXT,
+    skills TEXT NOT NULL DEFAULT '[]',
+    degree TEXT NOT NULL DEFAULT '[]',
+    designation TEXT NOT NULL DEFAULT '[]',
+    company_names TEXT NOT NULL DEFAULT '[]',
+    college_name TEXT NOT NULL DEFAULT '[]',
+    total_experience REAL,
+    no_of_pages INTEGER,
+    raw TEXT NOT NULL DEFAULT '{}',
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+)
+"""
 
 
 def _write_resume_file(tmp_path, name="resume.pdf", content=b"%PDF-1.4 fake resume"):
@@ -35,10 +63,19 @@ def _make_resume(file_path, **overrides):
         college_name=["MIT"],
         total_experience=3.5,
         no_of_pages=1,
+        resume_text="Jane Doe, software engineer with Python and SQL",
         raw={"name": "Jane Doe", "skills": ["Python", "SQL"]},
     )
     fields.update(overrides)
     return ParsedResume(**fields)
+
+
+def _fts_hits(conn, term):
+    rows = conn.execute(
+        "SELECT rowid FROM resumes_fts WHERE resumes_fts MATCH ?",
+        (f'"{term}"',),
+    ).fetchall()
+    return sorted(row["rowid"] for row in rows)
 
 
 def test_save_and_fetch_roundtrip(tmp_path):
@@ -70,6 +107,7 @@ def test_save_and_fetch_roundtrip(tmp_path):
     assert record["college_name"] == ["MIT"]
     assert record["total_experience"] == 3.5
     assert record["no_of_pages"] == 1
+    assert record["resume_text"] == "Jane Doe, software engineer with Python and SQL"
     assert record["raw"] == {"name": "Jane Doe", "skills": ["Python", "SQL"]}
     assert record["error"] is None
     assert record["created_at"] is not None
@@ -174,3 +212,103 @@ def test_store_parsed_sample_resume(tmp_path):
     assert record["file_name"] == "omkar_pathak.docx"
     assert record["file_size"] == GOOD_RESUME.stat().st_size
     assert stored_file == GOOD_RESUME.read_bytes()
+    assert record["resume_text"] and "Omkar Pathak" in record["resume_text"]
+
+
+def test_migration_adds_resume_text_to_legacy_db(tmp_path):
+    db_path = str(tmp_path / "legacy.db")
+    legacy_conn = sqlite3.connect(db_path)
+    legacy_conn.execute(_LEGACY_SCHEMA)
+    legacy_conn.execute("INSERT INTO resumes (file_path) VALUES ('old.pdf')")
+    legacy_conn.commit()
+    legacy_conn.close()
+
+    conn = get_connection(db_path)
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(resumes)")}
+        records = get_all_resumes(conn)
+    finally:
+        conn.close()
+
+    assert "resume_text" in columns
+    assert len(records) == 1
+    assert records[0]["resume_text"] is None
+
+
+def test_save_resume_syncs_fts_index(tmp_path):
+    file_path, _ = _write_resume_file(tmp_path)
+
+    conn = get_connection(str(tmp_path / "resumes.db"))
+    try:
+        resume_id = save_resume(conn, _make_resume(file_path))
+        hits = _fts_hits(conn, "python")
+        count = conn.execute("SELECT count(*) FROM resumes_fts").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert hits == [resume_id]
+    assert count == 1
+
+
+def test_save_resume_without_text_has_no_fts_row(tmp_path):
+    file_path, _ = _write_resume_file(tmp_path)
+
+    conn = get_connection(str(tmp_path / "resumes.db"))
+    try:
+        save_resume(conn, _make_resume(file_path, resume_text=None))
+        count = conn.execute("SELECT count(*) FROM resumes_fts").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert count == 0
+
+
+def test_upsert_same_file_refreshes_fts_index(tmp_path):
+    file_path, _ = _write_resume_file(tmp_path)
+
+    conn = get_connection(str(tmp_path / "resumes.db"))
+    try:
+        save_resume(conn, _make_resume(file_path, resume_text="kotlin only"))
+        save_resume(conn, _make_resume(file_path, resume_text="python only"))
+        kotlin_hits = _fts_hits(conn, "kotlin")
+        python_hits = _fts_hits(conn, "python")
+    finally:
+        conn.close()
+
+    assert kotlin_hits == []
+    assert python_hits == [1]
+
+
+def test_update_resume_text(tmp_path):
+    file_path, _ = _write_resume_file(tmp_path)
+
+    conn = get_connection(str(tmp_path / "resumes.db"))
+    try:
+        resume_id = save_resume(conn, _make_resume(file_path, resume_text=None))
+        updated = update_resume_text(conn, resume_id, "python developer")
+        missing = update_resume_text(conn, resume_id + 100, "text")
+        record = get_resume(conn, resume_id)
+        hits = _fts_hits(conn, "python")
+    finally:
+        conn.close()
+
+    assert updated is True
+    assert missing is False
+    assert record["resume_text"] == "python developer"
+    assert hits == [resume_id]
+
+
+def test_update_resume_text_to_none_removes_fts_row(tmp_path):
+    file_path, _ = _write_resume_file(tmp_path)
+
+    conn = get_connection(str(tmp_path / "resumes.db"))
+    try:
+        resume_id = save_resume(conn, _make_resume(file_path))
+        update_resume_text(conn, resume_id, None)
+        count = conn.execute("SELECT count(*) FROM resumes_fts").fetchone()[0]
+        record = get_resume(conn, resume_id)
+    finally:
+        conn.close()
+
+    assert count == 0
+    assert record["resume_text"] is None

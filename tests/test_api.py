@@ -3,8 +3,10 @@ from datetime import date
 import pytest
 from fastapi.testclient import TestClient
 
+import db
 import jobs_db
 import main
+from models import ParsedResume
 
 
 @pytest.fixture()
@@ -12,6 +14,27 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/test.db")
     with TestClient(main.app) as test_client:
         yield test_client
+
+
+@pytest.fixture()
+def resumes_db_path(tmp_path, monkeypatch):
+    db_path = tmp_path / "resumes.db"
+    resumes = []
+    for index, (name, text) in enumerate(
+        [("Alice", "Python and Docker"), ("Bob", "Java only")]
+    ):
+        resume_file = tmp_path / f"{index}.pdf"
+        resume_file.write_bytes(f"%PDF fake {index}".encode())
+        resumes.append(
+            ParsedResume(file_path=str(resume_file), name=name, resume_text=text)
+        )
+    conn = db.get_connection(str(db_path))
+    try:
+        db.save_resumes(conn, resumes)
+    finally:
+        conn.close()
+    monkeypatch.setenv("RESUMES_DB_PATH", str(db_path))
+    return str(db_path)
 
 
 def test_store_job_returns_stored_record(client):
@@ -42,10 +65,12 @@ def test_store_job_defaults_posted_date_to_today(client):
 
 def test_store_job_upserts_on_job_id(client):
     client.post(
-        "/jobs", json={"job_id": "J-3", "description": "v1", "posted_date": "2026-08-01"}
+        "/jobs",
+        json={"job_id": "J-3", "description": "v1", "posted_date": "2026-08-01"},
     )
     response = client.post(
-        "/jobs", json={"job_id": "J-3", "description": "v2", "posted_date": "2026-08-15"}
+        "/jobs",
+        json={"job_id": "J-3", "description": "v2", "posted_date": "2026-08-15"},
     )
 
     assert response.status_code == 201
@@ -60,10 +85,12 @@ def test_store_job_upserts_on_job_id(client):
 
 def test_list_jobs_orders_by_most_recent_posted_date(client):
     client.post(
-        "/jobs", json={"job_id": "OLD", "description": "old", "posted_date": "2026-01-01"}
+        "/jobs",
+        json={"job_id": "OLD", "description": "old", "posted_date": "2026-01-01"},
     )
     client.post(
-        "/jobs", json={"job_id": "NEW", "description": "new", "posted_date": "2026-08-01"}
+        "/jobs",
+        json={"job_id": "NEW", "description": "new", "posted_date": "2026-08-01"},
     )
 
     jobs = client.get("/jobs").json()
@@ -87,9 +114,7 @@ def test_get_job_not_found(client):
 
 def test_store_job_validation_errors(client):
     missing_description = client.post("/jobs", json={"job_id": "J-5"})
-    empty_description = client.post(
-        "/jobs", json={"job_id": "J-5", "description": ""}
-    )
+    empty_description = client.post("/jobs", json={"job_id": "J-5", "description": ""})
     empty_job_id = client.post("/jobs", json={"job_id": "", "description": "x"})
     bad_date = client.post(
         "/jobs",
@@ -107,6 +132,49 @@ def test_health(client):
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "database": "sqlite"}
+
+
+def test_search_resumes_ranks_best_matches_first(client, resumes_db_path):
+    response = client.post("/resumes/search", json={"keywords": ["python", "docker"]})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["name"] for item in body] == ["Alice"]
+    alice = body[0]
+    assert alice["distinct_keywords"] == 2
+    assert alice["total_matches"] == 2
+    assert alice["matched_keywords"] == [
+        {"keyword": "python", "count": 1},
+        {"keyword": "docker", "count": 1},
+    ]
+
+
+def test_search_resumes_no_match_returns_empty_list(client, resumes_db_path):
+    response = client.post("/resumes/search", json={"keywords": ["cobol"]})
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_search_resumes_blank_keywords_unprocessable(client, resumes_db_path):
+    response = client.post("/resumes/search", json={"keywords": ["   "]})
+
+    assert response.status_code == 422
+
+
+def test_search_resumes_empty_keyword_list_unprocessable(client):
+    response = client.post("/resumes/search", json={"keywords": []})
+
+    assert response.status_code == 422
+
+
+def test_search_resumes_missing_database_unavailable(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("RESUMES_DB_PATH", str(tmp_path / "missing.db"))
+
+    response = client.post("/resumes/search", json={"keywords": ["python"]})
+
+    assert response.status_code == 503
+    assert "not available" in response.json()["detail"]
 
 
 def test_get_engine_defaults_to_sqlite(monkeypatch):

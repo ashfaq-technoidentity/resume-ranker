@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from models import ParsedResume
-from parse import parse_resume, parse_resumes
+from parse import extract_resume_text, parse_resume, parse_resumes
 
 SAMPLES_DIR = Path(__file__).parent.parent / "sample_resumes"
 GOOD_RESUME = SAMPLES_DIR / "omkar_pathak.docx"
@@ -25,6 +25,31 @@ def test_parse_resume_error():
     assert result["file_path"] == str(BAD_RESUME)
 
 
+def test_parse_resume_extracts_full_text():
+    result = parse_resume(str(GOOD_RESUME))
+
+    assert result["resume_text"]
+    assert "Omkar Pathak" in result["resume_text"]
+    assert "Python" in result["resume_text"]
+
+
+def test_parse_resume_error_record_has_no_text():
+    result = parse_resume(str(BAD_RESUME))
+
+    assert result.get("resume_text") is None
+
+
+def test_extract_resume_text_unsupported_extension(tmp_path):
+    text_file = tmp_path / "resume.txt"
+    text_file.write_text("plain text resume")
+
+    assert extract_resume_text(str(text_file)) is None
+
+
+def test_extract_resume_text_missing_file(tmp_path):
+    assert extract_resume_text(str(tmp_path / "missing.pdf")) is None
+
+
 def test_parse_resumes_batch():
     results = parse_resumes(str(SAMPLES_DIR))
     expected_count = len(list(SAMPLES_DIR.glob("*.pdf"))) + len(
@@ -39,4 +64,6 @@ def test_parse_resumes_batch():
     assert good.name is not None and "Omkar Pathak" in good.name
     assert good.email == "omkarpathak27@gmail.com"
     assert "Python" in good.skills
+    assert good.resume_text and "Python" in good.resume_text
     assert bad.error is not None
+    assert bad.resume_text is None

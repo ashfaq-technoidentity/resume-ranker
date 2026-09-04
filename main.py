@@ -1,10 +1,16 @@
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, status
 from sqlalchemy import text
 
 import jobs_db
-from models import JobDescription, StoredJobDescription
+from models import (
+    JobDescription,
+    ResumeSearchRequest,
+    ResumeSearchResult,
+    StoredJobDescription,
+)
 
 
 @asynccontextmanager
@@ -46,6 +52,33 @@ def get_job(job_id: str, request: Request) -> StoredJobDescription:
             detail=f"Job '{job_id}' not found",
         )
     return record
+
+
+@app.post(
+    "/resumes/search",
+    response_model=list[ResumeSearchResult],
+    summary="Search stored resumes by keywords, best matches first",
+)
+def search_resumes_by_keywords(
+    search: ResumeSearchRequest,
+) -> list[ResumeSearchResult]:
+    # db/keyword_search are SQLite-only modules not shipped in the Docker
+    # image, so they are imported lazily; the 503 below fires first there.
+    db_path = os.environ.get("RESUMES_DB_PATH", "resumes.db")
+    if not os.path.exists(db_path):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Resume database not available at '{db_path}'",
+        )
+    import keyword_search
+
+    if not keyword_search.normalize_keywords(search.keywords):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="At least one non-empty keyword is required",
+        )
+    results = keyword_search.search_resumes(search.keywords, db_path=db_path)
+    return [ResumeSearchResult(**result) for result in results]
 
 
 @app.get("/health")

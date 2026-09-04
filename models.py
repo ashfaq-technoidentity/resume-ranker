@@ -15,6 +15,7 @@ class ParsedResume(BaseModel):
     college_name: list[str] = Field(default_factory=list)
     total_experience: float | None = None
     no_of_pages: int | None = None
+    resume_text: str | None = None
     raw: dict = Field(default_factory=dict)
     error: str | None = None
 
@@ -31,3 +32,24 @@ class StoredJobDescription(BaseModel):
     posted_date: date
     created_at: datetime
     updated_at: datetime
+
+
+class KeywordMatch(BaseModel):
+    keyword: str
+    count: int
+
+
+class ResumeSearchRequest(BaseModel):
+    keywords: list[str] = Field(min_length=1, max_length=50)
+
+
+class ResumeSearchResult(BaseModel):
+    id: int
+    name: str | None = None
+    email: str | None = None
+    file_name: str | None = None
+    skills: list[str] = Field(default_factory=list)
+    total_experience: float | None = None
+    distinct_keywords: int
+    total_matches: int
+    matched_keywords: list[KeywordMatch] = Field(default_factory=list)
