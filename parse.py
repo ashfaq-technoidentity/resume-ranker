@@ -71,12 +71,16 @@ def _to_parsed_resume(data: dict) -> ParsedResume:
         )
 
 
+def parse_file(file_path: str) -> ParsedResume:
+    """Parse a single resume file; parser failures become ParsedResume error records."""
+    return _to_parsed_resume(parse_resume(file_path))
+
+
 def parse_resumes(folder_path: str) -> list[ParsedResume]:
     results: list[ParsedResume] = []
     for pattern in ("*.pdf", "*.docx"):
         for file_path in glob.glob(os.path.join(folder_path, pattern)):
-            data = parse_resume(file_path)
-            results.append(_to_parsed_resume(data))
+            results.append(parse_file(file_path))
     return results
 
 
