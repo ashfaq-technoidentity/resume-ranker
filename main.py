@@ -2,14 +2,26 @@ import os
 import shutil
 import tempfile
 from contextlib import asynccontextmanager
+from typing import Annotated
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 import jobs_db
 from models import (
     JobDescription,
     JobDescriptionUpdate,
+    JobScoreRecord,
     ResumeRankResult,
     ResumeSearchRequest,
     ResumeSearchResult,
@@ -40,6 +52,20 @@ app = FastAPI(
         " skills and responsibilities (parse, store, semantic match)."
     ),
     lifespan=lifespan,
+)
+
+# The Vite dev server (frontend/) is on the default allowlist; override with
+# CORS_ORIGINS (comma-separated origins) for other setups.
+_DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        origin.strip()
+        for origin in os.environ.get("CORS_ORIGINS", _DEFAULT_CORS_ORIGINS).split(",")
+        if origin.strip()
+    ],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -132,7 +158,7 @@ def search_resumes_by_keywords(
     return [ResumeSearchResult(**result) for result in results]
 
 
-def _clean_form_list(values: list[str] | None) -> list[str]:
+def _clean_list(values: list[str] | None) -> list[str]:
     return [item.strip() for item in values or [] if item and item.strip()]
 
 
@@ -141,21 +167,26 @@ def _clean_form_list(values: list[str] | None) -> list[str]:
     response_model=ResumeRankResult,
     summary=(
         "Main workflow: upload a resume, parse and store it (text, parsed"
-        " details, and file), then score it against the job"
+        " details, and file), score it against the stored job, and store the"
+        " scores"
     ),
 )
 def rank_resume(
-    resume_file: UploadFile = File(..., description="Resume file (PDF or DOCX)"),
-    job_skills: list[str] | None = Form(
-        None, description="Skills the job requires (repeat the field per skill)"
-    ),
-    job_responsibilities: list[str] | None = Form(
-        None, description="Job responsibilities (repeat the field per item)"
-    ),
+    request: Request,
+    resume_file: Annotated[UploadFile, File(description="Resume file (PDF or DOCX)")],
+    job_id: Annotated[
+        str,
+        Form(
+            min_length=1,
+            max_length=255,
+            description="Id of the stored job to rank against",
+        ),
+    ],
 ) -> ResumeRankResult:
     """Parse the uploaded resume, store it with its file in the resumes
-    database, and return cosine similarity scores comparing the candidate's
-    skills and experience with the job's skills and responsibilities."""
+    database, return cosine similarity scores comparing the candidate's
+    skills and experience with the stored job's skills and responsibilities,
+    and store those scores in ``resume_job_scores`` keyed by (resume, job)."""
     # file_name is only used as a basename inside a private temp dir, but be
     # strict anyway: no client-supplied path pieces may survive
     file_name = os.path.basename((resume_file.filename or "").replace("\\", "/"))
@@ -174,12 +205,18 @@ def rank_resume(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Resume file '{file_name}' is empty",
         )
-    skills = _clean_form_list(job_skills)
-    responsibilities = _clean_form_list(job_responsibilities)
+    job = jobs_db.get_job(request.app.state.engine, job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job '{job_id}' doesn't exist",
+        )
+    skills = _clean_list(job.job_skills)
+    responsibilities = _clean_list(job.job_responsibilities)
     if not skills and not responsibilities:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="At least one non-empty job skill or responsibility is required",
+            detail=f"Job '{job_id}' has no skills or responsibilities to rank against",
         )
 
     # parser/resume-storage/semantic-match modules are SQLite-local deps not
@@ -243,8 +280,24 @@ def rank_resume(
             detail=f"Similarity calculation failed: {error}",
         ) from error
 
+    conn = db.get_connection(db_path)
+    try:
+        db.save_job_scores(
+            conn,
+            resume_id,
+            job_id,
+            match["skills_similarity"],
+            match["experience_similarity"],
+            match["average_similarity"],
+            match["model"],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
     return ResumeRankResult(
         resume_id=resume_id,
+        job_id=job_id,
         file_name=record["file_name"],
         file_hash=record["file_hash"],
         name=record["name"],
@@ -257,6 +310,87 @@ def rank_resume(
         skills_similarity=match["skills_similarity"],
         experience_similarity=match["experience_similarity"],
         average_similarity=match["average_similarity"],
+    )
+
+
+@app.get(
+    "/jobs/{job_id}/scores",
+    response_model=list[JobScoreRecord],
+    summary="List stored scores for a job, best average similarity first",
+)
+def list_job_scores(job_id: str) -> list[JobScoreRecord]:
+    """Return every resume ranked against ``job_id``, best candidates first.
+
+    ``job_id`` is a soft reference (the job may live in a different database
+    in production), so an unknown job id returns an empty list rather than
+    404.
+    """
+    # db is a SQLite-only module not shipped in the Docker image, so it is
+    # imported lazily; the 503 below fires first there.
+    db_path = os.environ.get("RESUMES_DB_PATH", "resumes.db")
+    if not os.path.exists(db_path):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Resume database not available at '{db_path}'",
+        )
+    import db
+
+    conn = db.get_connection(db_path)
+    try:
+        records = db.list_job_scores(conn, job_id)
+    finally:
+        conn.close()
+    return [JobScoreRecord(**record) for record in records]
+
+
+@app.get(
+    "/resumes/{resume_id}/file",
+    summary="Preview a stored resume in the browser (DOCX is converted to PDF)",
+)
+def get_resume_file(resume_id: int) -> Response:
+    """Serve the stored file of one resume for in-browser viewing: PDF files
+    pass through, DOCX files are converted to PDF server-side (cached by
+    content hash), and other file types download as attachments."""
+    # db/file_preview are SQLite-local modules not shipped in the Docker
+    # image, so import lazily; the 503 below fires first there.
+    db_path = os.environ.get("RESUMES_DB_PATH", "resumes.db")
+    if not os.path.exists(db_path):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Resume database not available at '{db_path}'",
+        )
+    try:
+        import db
+        import file_preview
+    except ImportError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Resume workflow modules are unavailable: {error}",
+        ) from error
+
+    conn = db.get_connection(db_path)
+    try:
+        record = db.get_resume(conn, resume_id)
+        blob = db.get_resume_file(conn, resume_id) if record is not None else None
+    finally:
+        conn.close()
+    if record is None or blob is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Resume '{resume_id}' or its stored file not found",
+        )
+
+    try:
+        body, media_type, disposition = file_preview.build_preview(blob, record)
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Resume preview unavailable: {error}",
+        ) from error
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={"Content-Disposition": disposition},
     )
 
 

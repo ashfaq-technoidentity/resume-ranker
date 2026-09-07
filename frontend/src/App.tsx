@@ -1,0 +1,86 @@
+import { useCallback, useEffect, useState } from "react"
+import { api, type StoredJob } from "./api"
+import { ErrorBanner } from "./components/ErrorBanner"
+import { Loading } from "./components/Loading"
+import { History } from "./screens/History"
+import { Jobs } from "./screens/Jobs"
+import { Rank } from "./screens/Rank"
+import { Search } from "./screens/Search"
+
+type Tab = "jobs" | "rank" | "search" | "history"
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: "jobs", label: "Jobs" },
+  { id: "rank", label: "Rank resume" },
+  { id: "search", label: "Search" },
+  { id: "history", label: "Score history" },
+]
+
+export default function App() {
+  const [tab, setTab] = useState<Tab>("jobs")
+  const [jobs, setJobs] = useState<StoredJob[]>([])
+  const [jobsError, setJobsError] = useState("")
+  const [loadingJobs, setLoadingJobs] = useState(true)
+  const [jobsVersion, setJobsVersion] = useState(0)
+
+  const reloadJobs = useCallback(() => {
+    setLoadingJobs(true)
+    setJobsError("")
+    setJobsVersion((version) => version + 1)
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    api
+      .listJobs()
+      .then((loaded) => {
+        if (cancelled) return
+        setJobs(loaded)
+        setJobsError("")
+      })
+      .catch((err: unknown) => {
+        if (!cancelled)
+          setJobsError(err instanceof Error ? err.message : String(err))
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingJobs(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [jobsVersion])
+
+  return (
+    <div className="app">
+      <header className="topbar">
+        <div className="topbar-inner">
+          <span className="brand">Resume Ranker</span>
+          <nav className="tabs">
+            {TABS.map(({ id, label }) => (
+              <button
+                key={id}
+                className={`tab ${tab === id ? "tab-active" : ""}`}
+                onClick={() => setTab(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </nav>
+        </div>
+      </header>
+      <main className="container">
+        {jobsError && <ErrorBanner message={jobsError} />}
+        {loadingJobs ? (
+          <Loading label="Loading jobs…" />
+        ) : (
+          <>
+            {tab === "jobs" && <Jobs jobs={jobs} onJobsChanged={reloadJobs} />}
+            {tab === "rank" && <Rank jobs={jobs} />}
+            {tab === "search" && <Search />}
+            {tab === "history" && <History jobs={jobs} />}
+          </>
+        )}
+      </main>
+    </div>
+  )
+}

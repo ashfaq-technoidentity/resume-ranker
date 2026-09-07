@@ -77,6 +77,7 @@ class ResumeRankResult(BaseModel):
     """Result of the rank workflow: stored resume summary + similarity scores."""
 
     resume_id: int
+    job_id: str
     file_name: str | None = None
     file_hash: str | None = None
     name: str | None = None
@@ -89,3 +90,20 @@ class ResumeRankResult(BaseModel):
     skills_similarity: float
     experience_similarity: float
     average_similarity: float
+
+
+class JobScoreRecord(BaseModel):
+    """One stored ranking: how a stored resume scored against a job."""
+
+    resume_id: int
+    job_id: str
+    name: str | None = None
+    email: str | None = None
+    file_name: str | None = None
+    skills: list[str] = Field(default_factory=list)
+    total_experience: float | None = None
+    skills_similarity: float
+    experience_similarity: float
+    average_similarity: float
+    model: str | None = None
+    updated_at: str

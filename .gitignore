@@ -21,6 +21,7 @@ htmlcov/
 parsed_resumes.json
 *.db
 *.sqlite3
+resume_previews/
 
 # Environment / secrets
 .env

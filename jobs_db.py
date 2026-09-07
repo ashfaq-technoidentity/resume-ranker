@@ -5,7 +5,7 @@ config) and PostgreSQL (via DATABASE_URL, used by the Docker deployment).
 """
 
 import os
-from datetime import date
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     JSON,
@@ -96,7 +96,7 @@ def _add_missing_columns(engine: Engine) -> None:
 
 def upsert_job(engine: Engine, job: JobDescription) -> StoredJobDescription:
     """Insert the job description, or update the row if job_id already exists."""
-    posted_date = job.posted_date or date.today()
+    posted_date = job.posted_date or datetime.now(timezone.utc).date()
     if engine.dialect.name == "postgresql":
         from sqlalchemy.dialects.postgresql import insert
     else:

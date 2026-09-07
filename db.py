@@ -7,6 +7,12 @@ re-parsing an unchanged file updates its row instead of duplicating it.
 
 The extracted text is also indexed in an FTS5 virtual table (``resumes_fts``,
 rowid = ``resumes.id``) for fast keyword shortlisting.
+
+Ranking results are stored in ``resume_job_scores``: one row per
+(resume, job) pair with the similarity scores of the candidate's skills and
+experience against the job's skills and responsibilities. ``job_id`` is a
+soft reference (the job may live in a different database in production);
+``resume_id`` references ``resumes.id``.
 """
 
 import hashlib
@@ -57,6 +63,21 @@ _FTS_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS resumes_fts USING fts5(resume_text)
 """
 
+_SCORES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS resume_job_scores (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    resume_id INTEGER NOT NULL REFERENCES resumes(id),
+    job_id TEXT NOT NULL,
+    skills_similarity REAL NOT NULL,
+    experience_similarity REAL NOT NULL,
+    average_similarity REAL NOT NULL,
+    model TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (resume_id, job_id)
+)
+"""
+
 _INSERT_SQL = """
 INSERT INTO resumes (
     file_path, file_name, file_ext, file_size, file_hash, file_blob,
@@ -86,6 +107,29 @@ ON CONFLICT(file_hash) DO UPDATE SET
     updated_at = datetime('now')
 """
 
+_SCORES_INSERT_SQL = """
+INSERT INTO resume_job_scores (
+    resume_id, job_id, skills_similarity, experience_similarity,
+    average_similarity, model
+) VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(resume_id, job_id) DO UPDATE SET
+    skills_similarity = excluded.skills_similarity,
+    experience_similarity = excluded.experience_similarity,
+    average_similarity = excluded.average_similarity,
+    model = excluded.model,
+    updated_at = datetime('now')
+"""
+
+_LIST_JOB_SCORES_SQL = """
+SELECT s.resume_id, s.job_id, s.skills_similarity, s.experience_similarity,
+       s.average_similarity, s.model, s.updated_at,
+       r.name, r.email, r.file_name, r.skills, r.total_experience
+FROM resume_job_scores s
+LEFT JOIN resumes r ON r.id = s.resume_id
+WHERE s.job_id = ?
+ORDER BY s.average_similarity DESC, s.updated_at DESC, s.resume_id
+"""
+
 _SELECT_COLUMNS = """
     id, file_path, file_name, file_ext, file_size, file_hash,
     name, email, mobile_number, skills, degree, designation,
@@ -108,6 +152,7 @@ def get_connection(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn.execute(_SCHEMA)
     _migrate(conn)
     conn.execute(_FTS_SCHEMA)
+    conn.execute(_SCORES_SCHEMA)
     conn.commit()
     return conn
 
@@ -195,6 +240,70 @@ def update_resume_text(
         return False
     _sync_fts(conn, resume_id, text)
     return True
+
+
+def save_job_scores(
+    conn: sqlite3.Connection,
+    resume_id: int,
+    job_id: str,
+    skills_similarity: float,
+    experience_similarity: float,
+    average_similarity: float,
+    model: str | None = None,
+) -> int:
+    """Store how one resume scored against one job's skills and responsibilities.
+
+    Re-ranking the same resume against the same job updates the existing row
+    (keyed by resume_id + job_id) instead of adding a new one. Returns the
+    score row id; the caller commits.
+    """
+    conn.execute(
+        _SCORES_INSERT_SQL,
+        (
+            resume_id,
+            job_id,
+            skills_similarity,
+            experience_similarity,
+            average_similarity,
+            model,
+        ),
+    )
+    row = conn.execute(
+        "SELECT id FROM resume_job_scores WHERE resume_id = ? AND job_id = ?",
+        (resume_id, job_id),
+    ).fetchone()
+    return row["id"]
+
+
+def get_job_scores(
+    conn: sqlite3.Connection, resume_id: int, job_id: str
+) -> dict | None:
+    """Return the stored scores for one (resume, job) pair, or None if absent."""
+    row = conn.execute(
+        """
+        SELECT id, resume_id, job_id, skills_similarity, experience_similarity,
+               average_similarity, model, created_at, updated_at
+        FROM resume_job_scores
+        WHERE resume_id = ? AND job_id = ?
+        """,
+        (resume_id, job_id),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_job_scores(conn: sqlite3.Connection, job_id: str) -> list[dict]:
+    """Return every stored score for ``job_id``, best average similarity first.
+
+    Candidate details come from a LEFT JOIN on ``resumes`` so scores whose
+    resume row is gone still show up (with null candidate fields).
+    """
+    rows = conn.execute(_LIST_JOB_SCORES_SQL, (job_id,)).fetchall()
+    records = []
+    for row in rows:
+        record = dict(row)
+        record["skills"] = json.loads(record["skills"]) if record["skills"] else []
+        records.append(record)
+    return records
 
 
 def _row_to_record(row: sqlite3.Row) -> dict:

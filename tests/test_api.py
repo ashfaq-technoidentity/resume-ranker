@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -6,6 +6,7 @@ from sqlalchemy import text
 
 import db
 import embedding_provider
+import file_preview
 import jobs_db
 import main
 import parse
@@ -23,13 +24,13 @@ def client(tmp_path, monkeypatch):
 def resumes_db_path(tmp_path, monkeypatch):
     db_path = tmp_path / "resumes.db"
     resumes = []
-    for index, (name, text) in enumerate(
+    for index, (name, resume_text) in enumerate(
         [("Alice", "Python and Docker"), ("Bob", "Java only")]
     ):
         resume_file = tmp_path / f"{index}.pdf"
         resume_file.write_bytes(f"%PDF fake {index}".encode())
         resumes.append(
-            ParsedResume(file_path=str(resume_file), name=name, resume_text=text)
+            ParsedResume(file_path=str(resume_file), name=name, resume_text=resume_text)
         )
     conn = db.get_connection(str(db_path))
     try:
@@ -63,7 +64,9 @@ def test_store_job_defaults_posted_date_to_today(client):
     )
 
     assert response.status_code == 201
-    assert response.json()["posted_date"] == date.today().isoformat()
+    assert (
+        response.json()["posted_date"] == datetime.now(timezone.utc).date().isoformat()
+    )
 
 
 def test_store_job_upserts_on_job_id(client):
@@ -341,18 +344,34 @@ def _install_provider(monkeypatch, provider) -> None:
 
 @pytest.fixture()
 def rank_env(client, tmp_path, monkeypatch):
-    """Ready-to-rank client: fresh resumes db, stubbed parser, no embeddings yet."""
+    """Ready-to-rank client: stored job, fresh resumes db, stubbed parser."""
     db_path = tmp_path / "resumes.db"
     monkeypatch.setenv("RESUMES_DB_PATH", str(db_path))
     monkeypatch.setattr(parse, "parse_file", _fake_parsed_resume)
+    client.post(
+        "/jobs",
+        json={
+            "job_id": "J-1",
+            "description": "Platform engineer role",
+            "job_skills": ["python", "docker"],
+            "job_responsibilities": ["build apis"],
+        },
+    )
     return client, str(db_path)
 
 
-def _rank(client, *, name="jane_doe.pdf", content=b"%PDF-1.4 fake resume", data=None):
+def _rank(
+    client,
+    *,
+    name="jane_doe.pdf",
+    content=b"%PDF-1.4 fake resume",
+    job_id="J-1",
+):
+    payload = {"job_id": job_id}
     return client.post(
         "/resumes/rank",
         files={"resume_file": (name, content, "application/pdf")},
-        data=data or {},
+        data={key: value for key, value in payload.items() if value is not None},
     )
 
 
@@ -368,17 +387,12 @@ def test_rank_resume_returns_similarity_scores(rank_env, monkeypatch):
     )
     _install_provider(monkeypatch, provider)
 
-    response = _rank(
-        client,
-        data={
-            "job_skills": ["python", "docker"],
-            "job_responsibilities": ["build apis"],
-        },
-    )
+    response = _rank(client)
 
     assert response.status_code == 200
     body = response.json()
     assert body["resume_id"] == 1
+    assert body["job_id"] == "J-1"
     assert body["file_name"] == "jane_doe.pdf"
     assert body["file_hash"] is not None
     assert body["name"] == "Jane Doe"
@@ -391,7 +405,8 @@ def test_rank_resume_returns_similarity_scores(rank_env, monkeypatch):
     assert body["skills_similarity"] == pytest.approx(1.0)
     assert body["experience_similarity"] == pytest.approx(1.0)
     assert body["average_similarity"] == pytest.approx(1.0)
-    # all four chunks go to the embedding provider in a single batched call
+    # JD chunks come from the stored job; all four chunks go to the embedding
+    # provider in a single batched call
     assert provider.seen_inputs == [
         [
             "Python, Docker",
@@ -404,6 +419,15 @@ def test_rank_resume_returns_similarity_scores(rank_env, monkeypatch):
 
 def test_rank_resume_scores_partial_overlap(rank_env, monkeypatch):
     client, _ = rank_env
+    client.post(
+        "/jobs",
+        json={
+            "job_id": "J-2",
+            "description": "Legacy systems role",
+            "job_skills": ["cobol"],
+            "job_responsibilities": ["maintain mainframes"],
+        },
+    )
     _install_provider(
         monkeypatch,
         StubEmbeddingProvider(
@@ -416,10 +440,7 @@ def test_rank_resume_scores_partial_overlap(rank_env, monkeypatch):
         ),
     )
 
-    response = _rank(
-        client,
-        data={"job_skills": ["cobol"], "job_responsibilities": ["maintain mainframes"]},
-    )
+    response = _rank(client, job_id="J-2")
 
     assert response.status_code == 200
     body = response.json()
@@ -436,19 +457,14 @@ def test_rank_resume_stores_text_details_and_file(rank_env, monkeypatch):
         StubEmbeddingProvider(
             {
                 "Python, Docker": [1.0, 0.0],
-                "python": [1.0, 0.0],
+                "python\ndocker": [1.0, 0.0],
                 "Built things at TechnoIdentity": [0.0, 1.0],
                 "build apis": [0.0, 1.0],
             }
         ),
     )
 
-    response = _rank(
-        client,
-        name="jane.pdf",
-        content=content,
-        data={"job_skills": ["python"], "job_responsibilities": ["build apis"]},
-    )
+    response = _rank(client, name="jane.pdf", content=content)
     resume_id = response.json()["resume_id"]
 
     conn = db.get_connection(db_path)
@@ -468,15 +484,18 @@ def test_rank_resume_reupload_same_content_updates_one_row(rank_env, monkeypatch
     client, db_path = rank_env
     _install_provider(
         monkeypatch,
-        StubEmbeddingProvider({"Python, Docker": [1.0, 0.0], "python": [1.0, 0.0]}),
+        StubEmbeddingProvider(
+            {
+                "Python, Docker": [1.0, 0.0],
+                "python\ndocker": [1.0, 0.0],
+                "Built things at TechnoIdentity": [0.0, 1.0],
+                "build apis": [0.0, 1.0],
+            }
+        ),
     )
 
-    first = _rank(
-        client, name="v1.pdf", content=b"%PDF same", data={"job_skills": ["python"]}
-    ).json()
-    second = _rank(
-        client, name="v2.pdf", content=b"%PDF same", data={"job_skills": ["python"]}
-    ).json()
+    first = _rank(client, name="v1.pdf", content=b"%PDF same").json()
+    second = _rank(client, name="v2.pdf", content=b"%PDF same").json()
 
     assert second["resume_id"] == first["resume_id"]
     assert second["file_name"] == "v2.pdf"
@@ -492,7 +511,7 @@ def test_rank_resume_reupload_same_content_updates_one_row(rank_env, monkeypatch
 def test_rank_resume_missing_file_part_unprocessable(rank_env):
     client, _ = rank_env
 
-    response = client.post("/resumes/rank", data={"job_skills": ["python"]})
+    response = client.post("/resumes/rank", data={"job_id": "J-1"})
 
     assert response.status_code == 422
 
@@ -509,23 +528,29 @@ def test_rank_resume_unsupported_file_type(client, tmp_path, monkeypatch):
 def test_rank_resume_empty_file_unprocessable(rank_env):
     client, _ = rank_env
 
-    response = _rank(client, content=b"", data={"job_skills": ["python"]})
+    response = _rank(client, content=b"")
 
     assert response.status_code == 422
     assert "is empty" in response.json()["detail"]
 
 
-def test_rank_resume_blank_job_fields_unprocessable(rank_env):
+def test_rank_resume_job_without_criteria_unprocessable(rank_env, monkeypatch):
     client, _ = rank_env
-
-    blank_entries = _rank(
-        client, data={"job_skills": ["   "], "job_responsibilities": [""]}
+    client.post(
+        "/jobs",
+        json={
+            "job_id": "J-EMPTY",
+            "description": "role with no structured criteria",
+            "job_skills": [],
+            "job_responsibilities": [],
+        },
     )
-    missing_fields = _rank(client)
+    _install_provider(monkeypatch, StubEmbeddingProvider({}))
 
-    assert blank_entries.status_code == 422
-    assert "At least one non-empty" in blank_entries.json()["detail"]
-    assert missing_fields.status_code == 422
+    response = _rank(client, job_id="J-EMPTY")
+
+    assert response.status_code == 422
+    assert "has no skills or responsibilities" in response.json()["detail"]
 
 
 def test_rank_resume_parse_failure_stores_record_and_reports(
@@ -533,6 +558,10 @@ def test_rank_resume_parse_failure_stores_record_and_reports(
 ):
     db_path = tmp_path / "resumes.db"
     monkeypatch.setenv("RESUMES_DB_PATH", str(db_path))
+    client.post(
+        "/jobs",
+        json={"job_id": "J-1", "description": "x", "job_skills": ["python"]},
+    )
     monkeypatch.setattr(
         parse,
         "parse_file",
@@ -540,12 +569,7 @@ def test_rank_resume_parse_failure_stores_record_and_reports(
     )
     _install_provider(monkeypatch, StubEmbeddingProvider({}))
 
-    response = _rank(
-        client,
-        name="broken.pdf",
-        content=b"%PDF corrupt",
-        data={"job_skills": ["python"]},
-    )
+    response = _rank(client, name="broken.pdf", content=b"%PDF corrupt")
 
     assert response.status_code == 422
     assert "Resume parsing failed: boom: corrupt docx" == response.json()["detail"]
@@ -556,6 +580,8 @@ def test_rank_resume_parse_failure_stores_record_and_reports(
         assert len(records) == 1
         assert records[0]["error"] == "boom: corrupt docx"
         assert db.get_resume_file(conn, records[0]["id"]) == b"%PDF corrupt"
+        # no scores are stored when parsing failed
+        assert db.get_job_scores(conn, records[0]["id"], "J-1") is None
     finally:
         conn.close()
 
@@ -570,7 +596,7 @@ def test_rank_resume_provider_not_configured(rank_env, monkeypatch):
 
     monkeypatch.setattr(embedding_provider, "get_embedding_provider", unconfigured)
 
-    response = _rank(client, data={"job_skills": ["python"]})
+    response = _rank(client)
 
     assert response.status_code == 503
     assert "Embedding provider is not configured" in response.json()["detail"]
@@ -587,10 +613,315 @@ def test_rank_resume_embedding_failure_bad_gateway(rank_env, monkeypatch):
 
     _install_provider(monkeypatch, ExplodingProvider())
 
-    response = _rank(client, data={"job_skills": ["python"]})
+    response = _rank(client)
 
     assert response.status_code == 502
     assert "Similarity calculation failed" in response.json()["detail"]
+
+
+def test_rank_resume_stores_scores_in_resume_job_scores(rank_env, monkeypatch):
+    client, db_path = rank_env
+    _install_provider(
+        monkeypatch,
+        StubEmbeddingProvider(
+            {
+                "Python, Docker": [1.0, 0.0],
+                "python\ndocker": [0.0, 1.0],
+                "Built things at TechnoIdentity": [0.0, 1.0],
+                "build apis": [1.0, 0.0],
+            }
+        ),
+    )
+
+    body = _rank(client).json()
+
+    conn = db.get_connection(db_path)
+    try:
+        scores = db.get_job_scores(conn, body["resume_id"], "J-1")
+    finally:
+        conn.close()
+
+    assert scores is not None
+    assert scores["resume_id"] == body["resume_id"]
+    assert scores["job_id"] == "J-1"
+    assert scores["skills_similarity"] == pytest.approx(body["skills_similarity"])
+    assert scores["experience_similarity"] == pytest.approx(
+        body["experience_similarity"]
+    )
+    assert scores["average_similarity"] == pytest.approx(body["average_similarity"])
+    assert scores["model"] == body["model"]
+    assert scores["created_at"] is not None
+
+
+def test_rank_resume_rerank_updates_stored_scores(rank_env, monkeypatch):
+    client, db_path = rank_env
+    _install_provider(
+        monkeypatch,
+        StubEmbeddingProvider(
+            {
+                "Python, Docker": [1.0, 0.0],
+                "python\ndocker": [1.0, 0.0],
+                "cobol": [0.0, 1.0],
+                "Built things at TechnoIdentity": [0.0, 1.0],
+                "build apis": [0.0, 1.0],
+                "maintain mainframes": [1.0, 0.0],
+            }
+        ),
+    )
+
+    first = _rank(client).json()
+    # the job's criteria change; the same resume+job pair is ranked again
+    client.put(
+        "/jobs/J-1",
+        json={"job_skills": ["cobol"], "job_responsibilities": ["maintain mainframes"]},
+    )
+    second = _rank(client).json()
+
+    conn = db.get_connection(db_path)
+    try:
+        rows = conn.execute("SELECT * FROM resume_job_scores").fetchall()
+        scores = db.get_job_scores(conn, second["resume_id"], "J-1")
+    finally:
+        conn.close()
+
+    assert second["resume_id"] == first["resume_id"]
+    assert first["skills_similarity"] == pytest.approx(1.0)
+    assert second["skills_similarity"] == pytest.approx(0.0)
+    assert len(rows) == 1  # same resume + job upserts, not a second row
+    assert scores["skills_similarity"] == pytest.approx(second["skills_similarity"])
+    assert scores["experience_similarity"] == pytest.approx(
+        second["experience_similarity"]
+    )
+    assert scores["average_similarity"] == pytest.approx(second["average_similarity"])
+
+
+def test_rank_resume_unknown_job_not_found(rank_env):
+    client, _ = rank_env
+
+    response = _rank(client, job_id="NOPE")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Job 'NOPE' doesn't exist"
+
+
+def test_rank_resume_missing_job_id_unprocessable(rank_env):
+    client, _ = rank_env
+
+    response = _rank(client, job_id=None)
+
+    assert response.status_code == 422
+
+
+def test_job_scores_lists_best_matches_first(client, resumes_db_path):
+    conn = db.get_connection(resumes_db_path)
+    try:
+        db.save_job_scores(conn, 1, "J-1", 0.2, 0.2, 0.2, "m1")
+        db.save_job_scores(conn, 2, "J-1", 0.9, 0.7, 0.8, "m2")
+        db.save_job_scores(conn, 1, "J-2", 1.0, 1.0, 1.0, "m1")
+        conn.commit()
+    finally:
+        conn.close()
+
+    response = client.get("/jobs/J-1/scores")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["resume_id"] for item in body] == [2, 1]
+    top = body[0]
+    assert top["job_id"] == "J-1"
+    assert top["name"] == "Bob"
+    assert top["email"] is None
+    assert top["file_name"] == "1.pdf"
+    assert top["skills"] == []
+    assert top["total_experience"] is None
+    assert top["skills_similarity"] == pytest.approx(0.9)
+    assert top["experience_similarity"] == pytest.approx(0.7)
+    assert top["average_similarity"] == pytest.approx(0.8)
+    assert top["model"] == "m2"
+    assert top["updated_at"]
+
+
+def test_job_scores_unknown_job_returns_empty_list(client, resumes_db_path):
+    response = client.get("/jobs/NOPE/scores")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_job_scores_missing_database_unavailable(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("RESUMES_DB_PATH", str(tmp_path / "missing.db"))
+
+    response = client.get("/jobs/J-1/scores")
+
+    assert response.status_code == 503
+    assert "not available" in response.json()["detail"]
+
+
+def test_ranked_resume_appears_in_job_scores(rank_env, monkeypatch):
+    client, _ = rank_env
+    _install_provider(
+        monkeypatch,
+        StubEmbeddingProvider(
+            {
+                "Python, Docker": [1.0, 0.0],
+                "python\ndocker": [1.0, 0.0],
+                "Built things at TechnoIdentity": [0.0, 1.0],
+                "build apis": [0.0, 1.0],
+            }
+        ),
+    )
+    ranked = _rank(client).json()
+
+    response = client.get("/jobs/J-1/scores")
+
+    assert response.status_code == 200
+    scores = response.json()
+    assert len(scores) == 1
+    assert scores[0]["resume_id"] == ranked["resume_id"]
+    assert scores[0]["name"] == "Jane Doe"
+    assert scores[0]["file_name"] == "jane_doe.pdf"
+    assert scores[0]["skills"] == ["Python", "Docker"]
+    assert scores[0]["model"] == "stub-model"
+    assert scores[0]["average_similarity"] == pytest.approx(
+        ranked["average_similarity"]
+    )
+
+
+def _store_resume_row(resumes_db_path, tmp_path, file_name, content):
+    """Save one more resume row directly; return (resume_id, record)."""
+    resume_file = tmp_path / file_name
+    resume_file.write_bytes(content)
+    conn = db.get_connection(resumes_db_path)
+    try:
+        resume_id = db.save_resume(
+            conn, ParsedResume(file_path=str(resume_file), resume_text="stored text")
+        )
+        conn.commit()
+        record = db.get_resume(conn, resume_id)
+    finally:
+        conn.close()
+    return resume_id, record
+
+
+def test_resume_file_pdf_served_inline(client, resumes_db_path):
+    response = client.get("/resumes/1/file")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/pdf")
+    assert response.headers["content-disposition"] == 'inline; filename="0.pdf"'
+    assert response.content == b"%PDF fake 0"
+
+
+def test_resume_file_docx_converted_to_pdf(
+    client, resumes_db_path, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("RESUME_PREVIEW_CACHE_DIR", str(tmp_path / "previews"))
+    resume_id, _ = _store_resume_row(
+        resumes_db_path, tmp_path, "carol.docx", b"PK fake docx"
+    )
+    monkeypatch.setattr(
+        file_preview, "convert_docx_to_pdf", lambda blob, cache_path: b"%PDF converted"
+    )
+
+    response = client.get(f"/resumes/{resume_id}/file")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/pdf")
+    assert response.headers["content-disposition"] == 'inline; filename="carol.pdf"'
+    assert response.content == b"%PDF converted"
+
+
+def test_resume_file_docx_uses_cached_pdf(
+    client, resumes_db_path, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("RESUME_PREVIEW_CACHE_DIR", str(tmp_path / "previews"))
+    resume_id, record = _store_resume_row(
+        resumes_db_path, tmp_path, "cached.docx", b"PK cached docx"
+    )
+    cache_dir = tmp_path / "previews"
+    cache_dir.mkdir()
+    (cache_dir / f"{record['file_hash']}.pdf").write_bytes(b"%PDF cached")
+
+    def must_not_convert(blob, cache_path):
+        raise AssertionError("cached previews must not re-convert")
+
+    monkeypatch.setattr(file_preview, "convert_docx_to_pdf", must_not_convert)
+
+    response = client.get(f"/resumes/{resume_id}/file")
+
+    assert response.status_code == 200
+    assert response.content == b"%PDF cached"
+    assert response.headers["content-disposition"] == 'inline; filename="cached.pdf"'
+
+
+def test_resume_file_docx_conversion_failure_unavailable(
+    client, resumes_db_path, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("RESUME_PREVIEW_CACHE_DIR", str(tmp_path / "previews"))
+    resume_id, _ = _store_resume_row(
+        resumes_db_path, tmp_path, "broken.docx", b"PK broken docx"
+    )
+
+    def failing(blob, cache_path):
+        raise RuntimeError("LibreOffice (soffice) is not installed")
+
+    monkeypatch.setattr(file_preview, "convert_docx_to_pdf", failing)
+
+    response = client.get(f"/resumes/{resume_id}/file")
+
+    assert response.status_code == 503
+    assert "Resume preview unavailable" in response.json()["detail"]
+    assert "LibreOffice" in response.json()["detail"]
+
+
+def test_resume_file_other_type_downloads_as_attachment(
+    client, resumes_db_path, tmp_path
+):
+    resume_id, _ = _store_resume_row(
+        resumes_db_path, tmp_path, "notes.txt", b"plain notes"
+    )
+
+    response = client.get(f"/resumes/{resume_id}/file")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/octet-stream")
+    assert response.headers["content-disposition"] == 'attachment; filename="notes.txt"'
+    assert response.content == b"plain notes"
+
+
+def test_resume_file_unknown_resume_not_found(client, resumes_db_path):
+    response = client.get("/resumes/999/file")
+
+    assert response.status_code == 404
+
+
+def test_resume_file_missing_database_unavailable(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("RESUMES_DB_PATH", str(tmp_path / "missing.db"))
+
+    response = client.get("/resumes/1/file")
+
+    assert response.status_code == 503
+    assert "not available" in response.json()["detail"]
+
+
+def test_convert_docx_to_pdf_requires_libreoffice(tmp_path, monkeypatch):
+    monkeypatch.setattr(file_preview.shutil, "which", lambda name: None)
+
+    with pytest.raises(RuntimeError, match="LibreOffice"):
+        file_preview.convert_docx_to_pdf(b"PK docx", str(tmp_path / "cache.pdf"))
+
+
+def test_cors_preflight_allowed_from_vite_dev_server(client):
+    response = client.options(
+        "/jobs",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
 
 
 def test_get_engine_defaults_to_sqlite(monkeypatch):

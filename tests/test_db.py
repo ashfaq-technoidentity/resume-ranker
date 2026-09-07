@@ -5,8 +5,10 @@ from pathlib import Path
 from db import (
     get_all_resumes,
     get_connection,
+    get_job_scores,
     get_resume,
     get_resume_file,
+    save_job_scores,
     save_resume,
     save_resumes,
     update_resume_text,
@@ -312,3 +314,55 @@ def test_update_resume_text_to_none_removes_fts_row(tmp_path):
 
     assert count == 0
     assert record["resume_text"] is None
+
+
+def test_save_and_get_job_scores(tmp_path):
+    file_path, _ = _write_resume_file(tmp_path)
+
+    conn = get_connection(str(tmp_path / "resumes.db"))
+    try:
+        resume_id = save_resume(conn, _make_resume(file_path))
+        score_id = save_job_scores(
+            conn, resume_id, "J-1", 0.75, 0.5, 0.625, "stub-model"
+        )
+        conn.commit()
+        scores = get_job_scores(conn, resume_id, "J-1")
+        other_job = get_job_scores(conn, resume_id, "J-2")
+        other_resume = get_job_scores(conn, resume_id + 100, "J-1")
+    finally:
+        conn.close()
+
+    assert scores is not None
+    assert scores["id"] == score_id
+    assert scores["resume_id"] == resume_id
+    assert scores["job_id"] == "J-1"
+    assert scores["skills_similarity"] == 0.75
+    assert scores["experience_similarity"] == 0.5
+    assert scores["average_similarity"] == 0.625
+    assert scores["model"] == "stub-model"
+    assert scores["created_at"] is not None
+    assert other_job is None
+    assert other_resume is None
+
+
+def test_save_job_scores_upserts_same_resume_and_job(tmp_path):
+    file_path, _ = _write_resume_file(tmp_path)
+
+    conn = get_connection(str(tmp_path / "resumes.db"))
+    try:
+        resume_id = save_resume(conn, _make_resume(file_path))
+        first_id = save_job_scores(conn, resume_id, "J-1", 0.1, 0.2, 0.15, "m1")
+        second_id = save_job_scores(conn, resume_id, "J-1", 0.7, 0.8, 0.75, "m2")
+        save_job_scores(conn, resume_id, "J-2", 0.9, 0.9, 0.9, "m2")
+        conn.commit()
+        rows = conn.execute("SELECT * FROM resume_job_scores").fetchall()
+        scores = get_job_scores(conn, resume_id, "J-1")
+    finally:
+        conn.close()
+
+    assert second_id == first_id
+    assert len(rows) == 2  # (resume, J-1) upserted; (resume, J-2) separate
+    assert scores["skills_similarity"] == 0.7
+    assert scores["experience_similarity"] == 0.8
+    assert scores["average_similarity"] == 0.75
+    assert scores["model"] == "m2"
