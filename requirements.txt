@@ -1,6 +1,3 @@
 -r requirements-api.txt
-pydparser==1.0.4
+-r requirements-parser.txt
 pytest==9.1.1
-httpx==0.28.1
-numpy==1.26.4
-python-dotenv==1.0.1

@@ -15,18 +15,60 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: ${DB_MEM_LIMIT:-512m}
+    networks:
+      - backend
 
   api:
-    build: .
+    build:
+      context: .
+      target: api
+    image: resume-ranker-api
     restart: unless-stopped
+    init: true
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-resume_ranker}:${POSTGRES_PASSWORD:-resume_ranker}@db:5432/${POSTGRES_DB:-resume_ranker}
+      RESUMES_DB_PATH: /data/resumes/resumes.db
+      RESUME_PREVIEW_CACHE_DIR: /data/previews
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in .env}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openrouter}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-openai/text-embedding-3-small}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
       UVICORN_WORKERS: ${UVICORN_WORKERS:-1}
+    volumes:
+      - resumes:/data/resumes
+      - previews:/data/previews
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
       db:
         condition: service_healthy
+    # hardened runtime: read-only rootfs (LibreOffice profiles and upload
+    # spooling live on the /tmp tmpfs; SQLite and the preview cache live on
+    # the named volumes), no caps, no privilege escalation
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,size=256m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: ${API_MEM_LIMIT:-2g}
+    cpus: ${API_CPUS:-2}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - backend
+
+networks:
+  backend:
 
 volumes:
   pgdata:
+  resumes:
+  previews:

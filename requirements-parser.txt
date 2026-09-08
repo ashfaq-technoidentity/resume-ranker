@@ -1,0 +1,7 @@
+# Runtime deps of the resume workflow (parse.py, semantic_match.py,
+# embedding_provider.py); the Dockerfile installs these alongside
+# requirements-api.txt. Tests add pytest via requirements.txt.
+pydparser==1.0.4
+numpy==1.26.4
+httpx==0.28.1
+python-dotenv==1.0.1

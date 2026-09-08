@@ -12,3 +12,7 @@ sample_resumes/
 tests/
 parsed_resumes.json
 setup.sh
+frontend/
+resume_previews/
+docker-compose.yml
+*.md

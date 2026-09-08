@@ -139,8 +139,8 @@ def delete_job(job_id: str, request: Request) -> None:
 def search_resumes_by_keywords(
     search: ResumeSearchRequest,
 ) -> list[ResumeSearchResult]:
-    # db/keyword_search are SQLite-only modules not shipped in the Docker
-    # image, so they are imported lazily; the 503 below fires first there.
+    # db/keyword_search are SQLite-only modules, imported lazily so an
+    # install without them still serves the rest of the API (503 below).
     db_path = os.environ.get("RESUMES_DB_PATH", "resumes.db")
     if not os.path.exists(db_path):
         raise HTTPException(
@@ -219,9 +219,9 @@ def rank_resume(
             detail=f"Job '{job_id}' has no skills or responsibilities to rank against",
         )
 
-    # parser/resume-storage/semantic-match modules are SQLite-local deps not
-    # shipped in the slim API image, so import lazily; the 503 below fires
-    # first there instead of crashing the app at import time.
+    # parser/resume-storage/semantic-match modules are imported lazily so an
+    # install without them still serves the rest of the API; the 503 below
+    # fires first instead of crashing the app at import time.
     try:
         import db
         import embedding_provider
@@ -351,8 +351,8 @@ def get_resume_file(resume_id: int) -> Response:
     """Serve the stored file of one resume for in-browser viewing: PDF files
     pass through, DOCX files are converted to PDF server-side (cached by
     content hash), and other file types download as attachments."""
-    # db/file_preview are SQLite-local modules not shipped in the Docker
-    # image, so import lazily; the 503 below fires first there.
+    # db/file_preview are imported lazily so an install without them still
+    # serves the rest of the API; the 503 below fires first there.
     db_path = os.environ.get("RESUMES_DB_PATH", "resumes.db")
     if not os.path.exists(db_path):
         raise HTTPException(
