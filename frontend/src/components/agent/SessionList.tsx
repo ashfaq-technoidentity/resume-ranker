@@ -1,4 +1,6 @@
 import type { AgentSession } from "../../api"
+import { Icon } from "./Icon"
+import { formatAbsolute, formatRelative } from "./time"
 
 export function SessionList({
   sessions,
@@ -23,7 +25,8 @@ export function SessionList({
         disabled={runningId !== null}
         type="button"
       >
-        + New chat
+        <Icon name="plus" size={16} />
+        New chat
       </button>
       {sessions.length === 0 ? (
         <p className="muted small session-empty">No chats yet.</p>
@@ -44,7 +47,13 @@ export function SessionList({
                   {session.id === runningId && (
                     <span className="session-spinner" aria-label="running" />
                   )}
-                  {session.title}
+                  <span className="session-name">{session.title}</span>
+                </span>
+                <span
+                  className="session-meta"
+                  title={formatAbsolute(session.created_at)}
+                >
+                  {formatRelative(session.created_at)}
                 </span>
               </button>
               <button
@@ -54,7 +63,7 @@ export function SessionList({
                 title="Delete chat"
                 type="button"
               >
-                ✕
+                <Icon name="trash" size={14} />
               </button>
             </li>
           ))}

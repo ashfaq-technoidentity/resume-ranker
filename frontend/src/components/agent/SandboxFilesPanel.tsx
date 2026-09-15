@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { agentApi, type SandboxFileContent, type SandboxFileEntry } from "../../api"
+import { Icon } from "./Icon"
 
 function formatSize(size: number): string {
   if (size < 1024) return `${size} B`
@@ -7,8 +8,13 @@ function formatSize(size: number): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MiB`
 }
 
-// Browser for the sandbox's /workspace: scripts the agent wrote, results it
-// saved, and activity.log (the same file the docker-logs panel streams).
+function formatTime(mtime: number | null): string {
+  if (!mtime) return ""
+  return new Intl.DateTimeFormat("en", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(mtime * 1000)
+}
 
 export function SandboxFilesPanel({
   sessionId,
@@ -58,38 +64,59 @@ export function SandboxFilesPanel({
   }
 
   const segments = path.split("/").filter(Boolean)
-  const breadcrumb = ["/", ...segments.map((segment, index) => (
-    <span key={`${segments.slice(0, index + 1).join("/")}`}>
-      <button
-        className="crumb"
-        type="button"
-        onClick={() => {
-          const next = `/${segments.slice(0, index + 1).join("/")}`
-          setPath(next)
-          load(next)
-        }}
-      >
-        {segment}
-      </button>
-      {index < segments.length - 1 ? "/" : ""}
-    </span>
-  ))]
+  const breadcrumb = [
+    <button
+      key="root"
+      className="crumb"
+      type="button"
+      onClick={() => {
+        setPath("/workspace")
+        load("/workspace")
+      }}
+    >
+      workspace
+    </button>,
+    ...segments.slice(1).map((segment, index) => {
+      const prefix = "/" + segments.slice(0, index + 2).join("/")
+      return (
+        <span key={prefix}>
+          <span className="crumb-separator">/</span>
+          <button
+            className="crumb"
+            type="button"
+            onClick={() => {
+              setPath(prefix)
+              load(prefix)
+            }}
+          >
+            {segment}
+          </button>
+        </span>
+      )
+    }),
+  ]
 
   return (
     <div className="files-panel">
       <div className="logs-toolbar">
-        <span className="crumbs">{breadcrumb}</span>
+        <span className="crumbs">
+          <Icon name="folder" size={14} />
+          {breadcrumb}
+        </span>
         <button
-          className="btn btn-small"
+          className="btn btn-small btn-icon"
           type="button"
           disabled={busy}
           onClick={() => load(path)}
+          title="Refresh"
         >
-          Refresh
+          <Icon name="refresh" size={14} />
         </button>
       </div>
-      {error && <p className="muted small">{error}</p>}
-      {entries === null && !error && <p className="muted small">No sandbox files.</p>}
+      {error && <p className="muted small error-text">{error}</p>}
+      {entries === null && !error && (
+        <p className="muted small">No sandbox files.</p>
+      )}
       {entries !== null && (
         <ul className="filetree">
           {entries.map((entry) => (
@@ -98,13 +125,18 @@ export function SandboxFilesPanel({
                 className="filetree-row"
                 type="button"
                 onClick={() =>
-                  entry.is_dir ? (setPath(entry.path), load(entry.path)) : openFile(entry)
+                  entry.is_dir
+                    ? (setPath(entry.path), load(entry.path))
+                    : openFile(entry)
                 }
               >
-                <span aria-hidden>{entry.is_dir ? "📁" : "📄"}</span>
+                <span className="filetree-icon" aria-hidden>
+                  <Icon name={entry.is_dir ? "folder" : "file"} size={14} />
+                </span>
                 <span className="filetree-name">{entry.name}</span>
-                <span className="muted small">
+                <span className="muted small filetree-meta">
                   {entry.is_dir ? "" : formatSize(entry.size)}
+                  {entry.mtime && !entry.is_dir ? ` · ${formatTime(entry.mtime)}` : ""}
                 </span>
               </button>
             </li>
@@ -117,11 +149,13 @@ export function SandboxFilesPanel({
       {file && (
         <div className="file-viewer">
           <div className="logs-toolbar">
-            <span className="muted small">
-              {file.path}
-              {file.truncated ? " (truncated)" : ""}
-            </span>
-            <button className="btn btn-small" type="button" onClick={() => setFile(null)}>
+            <span className="muted small file-path">{file.path}</span>
+            {file.truncated && <span className="muted small">(truncated)</span>}
+            <button
+              className="btn btn-small"
+              type="button"
+              onClick={() => setFile(null)}
+            >
               Close
             </button>
           </div>

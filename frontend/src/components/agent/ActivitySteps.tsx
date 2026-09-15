@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import type { AgentEvent } from "../../api"
+import { Icon } from "./Icon"
 
 // Steps the agent took during one run: thoughts and tool calls with their
 // (streamed) output. Rendered from live SSE events or replayed DB events.
@@ -69,9 +70,13 @@ function ToolStepView({ step }: { step: ToolStep }) {
   const exitOk = step.exitCode === 0
   const exitBadge =
     step.exitCode === null ? (
-      <span className="step-badge step-running-badge">running…</span>
+      <span className="step-badge step-running-badge">
+        <span className="step-spinner" aria-hidden />
+        running
+      </span>
     ) : (
       <span className={`step-badge ${exitOk ? "step-ok" : "step-fail"}`}>
+        {exitOk && <Icon name="check" size={10} />}
         exit {step.exitCode}
       </span>
     )
@@ -80,21 +85,30 @@ function ToolStepView({ step }: { step: ToolStep }) {
     <div className={`step step-tool ${open ? "step-open" : ""}`}>
       <button className="step-head" onClick={() => setOpen(!open)} type="button">
         <span className="step-chevron" aria-hidden>
-          {open ? "▾" : "▸"}
+          <Icon name={open ? "chevron-down" : "chevron-right"} size={12} />
+        </span>
+        <span className="step-icon">
+          <Icon name={isPython ? "terminal" : "package"} size={14} />
         </span>
         <span className="step-title">
-          {isPython ? "🧪 ran Python" : "📦 installed packages"}
+          {isPython ? "Ran Python" : "Installed packages"}
         </span>
         {exitBadge}
       </button>
       {open && (
         <div className="step-body">
-          <pre className="step-code">{code}</pre>
+          <div className="step-section">
+            <span className="step-section-label">Input</span>
+            <pre className="step-code">{code}</pre>
+          </div>
           {step.output && (
-            <pre className="step-output">
-              {step.output}
-              {!step.done && <span className="cursor">▊</span>}
-            </pre>
+            <div className="step-section">
+              <span className="step-section-label">Output</span>
+              <pre className="step-output">
+                {step.output}
+                {!step.done && <span className="cursor">▊</span>}
+              </pre>
+            </div>
           )}
         </div>
       )}
@@ -124,15 +138,23 @@ export function ActivitySteps({
     <div className={`steps ${open ? "steps-open" : ""}`}>
       <button className="steps-toggle" onClick={() => setOpen(!open)} type="button">
         <span className="step-chevron" aria-hidden>
-          {open ? "▾" : "▸"}
+          <Icon name={open ? "chevron-down" : "chevron-right"} size={12} />
         </span>
-        {running ? "Working…" : `Agent steps (${steps.length})`}
+        <span className="step-icon">
+          <Icon name="code" size={14} />
+        </span>
+        <span className="steps-toggle-title">
+          {running ? "Assistant is working" : `Agent steps (${steps.length})`}
+        </span>
       </button>
       {open && (
         <div className="steps-list">
           {steps.map((step, index) =>
             step.kind === "thought" ? (
               <div className="step step-thought" key={`thought-${index}`}>
+                <span className="step-thought-icon">
+                  <Icon name="lightbulb" size={14} />
+                </span>
                 {step.content}
               </div>
             ) : (

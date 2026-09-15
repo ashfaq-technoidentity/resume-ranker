@@ -74,12 +74,13 @@ export function DockerLogsPanel({
   return (
     <div className="logs-panel">
       <div className="logs-toolbar">
-        <span className={`dot ${connected ? "dot-ok" : "dot-off"}`} />
-        <span className="muted small">
-          {connected ? "streaming docker logs" : "not streaming"}
+        <span className="logs-status">
+          <span className={`dot ${connected ? "dot-ok" : "dot-off"}`} />
+          <span className="muted small">{connected ? "Live" : "Offline"}</span>
         </span>
+        <span className="muted small">{lines.length.toLocaleString()} lines</span>
       </div>
-      {notice && <p className="muted small">{notice}</p>}
+      {notice && <p className="muted small error-text">{notice}</p>}
       <pre className="console" ref={consoleRef}>
         {lines.length ? lines.join("\n") : "(no logs yet — ask the assistant something)"}
       </pre>

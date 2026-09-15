@@ -2,10 +2,7 @@ import { useEffect, useState } from "react"
 import { agentApi, type SandboxStatus } from "../../api"
 import { DockerLogsPanel } from "./DockerLogsPanel"
 import { SandboxFilesPanel } from "./SandboxFilesPanel"
-
-// Right-hand drawer: sandbox status + reset, docker logs, and the workspace
-// file browser. Panels re-initialise whenever the sandbox is reset
-// (resetKey changes).
+import { Icon } from "./Icon"
 
 export function SandboxDrawer({
   sessionId,
@@ -37,21 +34,31 @@ export function SandboxDrawer({
             <div className="drawer-title">
               {status?.running ? "Sandbox running" : "Sandbox stopped"}
             </div>
-            <div className="muted small">
-              {status?.image ?? "—"}
-              {status?.mem_usage ? ` · ${status.mem_usage}` : ""}
-              {status?.cpu_percent != null ? ` · ${status.cpu_percent}% cpu` : ""}
+            <div className="drawer-meta">
+              {status?.image && (
+                <span className="chip" title="Image">{status.image}</span>
+              )}
+              {status?.mem_usage && (
+                <span className="chip" title="Memory">
+                  <Icon name="memory" size={12} /> {status.mem_usage}
+                </span>
+              )}
+              {status?.cpu_percent != null && (
+                <span className="chip" title="CPU">
+                  <Icon name="cpu" size={12} /> {status.cpu_percent}%
+                </span>
+              )}
             </div>
           </div>
         </div>
         <button
-          className="btn btn-danger btn-small"
+          className="btn btn-danger btn-small btn-icon"
           type="button"
           disabled={running}
           onClick={onReset}
           title={running ? "Wait for the run to finish" : "Fresh container, empty workspace"}
         >
-          Reset sandbox
+          <Icon name="refresh" size={14} />
         </button>
       </div>
       <div className="drawer-tabs">
@@ -60,6 +67,7 @@ export function SandboxDrawer({
           onClick={() => setTab("logs")}
           type="button"
         >
+          <Icon name="terminal" size={13} />
           Docker logs
         </button>
         <button
@@ -67,6 +75,7 @@ export function SandboxDrawer({
           onClick={() => setTab("files")}
           type="button"
         >
+          <Icon name="folder" size={13} />
           Files
         </button>
       </div>

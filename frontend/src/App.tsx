@@ -70,7 +70,7 @@ export default function App() {
           </nav>
         </div>
       </header>
-      <main className="container">
+      <main className={`container ${tab === "assistant" ? "container-wide" : ""}`}>
         {jobsError && <ErrorBanner message={jobsError} />}
         {tab === "assistant" ? (
           <Assistant />

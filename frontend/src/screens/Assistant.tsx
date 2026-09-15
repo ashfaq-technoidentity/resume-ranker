@@ -14,15 +14,23 @@ import {
   type AgentSession,
 } from "../api"
 import { ErrorBanner } from "../components/ErrorBanner"
+import { Loading } from "../components/Loading"
 import { streamAgentChat } from "../sse"
 import { ActivitySteps } from "../components/agent/ActivitySteps"
 import { ChatMessage } from "../components/agent/ChatMessage"
 import { SandboxDrawer } from "../components/agent/SandboxDrawer"
 import { SessionList } from "../components/agent/SessionList"
+import { Icon } from "../components/agent/Icon"
 
 type TranscriptItem =
   | { kind: "message"; message: AgentMessage }
   | { kind: "steps"; events: AgentEvent[] }
+
+const SAMPLE_PROMPTS = [
+  'Pick out candidates that have "python" in their resume',
+  "Which candidates have 5+ years of experience with AWS?",
+  "Compare the skill sets of the top-ranked candidates for J-1",
+]
 
 export function Assistant() {
   const [sessions, setSessions] = useState<AgentSession[] | null>(null)
@@ -39,6 +47,7 @@ export function Assistant() {
   const activeIdRef = useRef<string | null>(null)
   const runEventsRef = useRef<AgentEvent[]>([])
   const bottomRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const refreshSessions = useCallback(() => {
     agentApi
@@ -77,6 +86,13 @@ export function Assistant() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
   }, [messages, runEvents])
 
+  useEffect(() => {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = "auto"
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`
+  }, [input])
+
   const newChat = () => {
     if (running) return
     setActiveId(null)
@@ -87,6 +103,7 @@ export function Assistant() {
     runEventsRef.current = []
     setError("")
     setInput("")
+    textareaRef.current?.focus()
   }
 
   const deleteSession = async (sessionId: string) => {
@@ -221,35 +238,54 @@ export function Assistant() {
 
   return (
     <div className={`agent-layout ${drawerOpen && hasChat ? "" : "no-drawer"}`}>
-      <SessionList
-        activeId={activeId}
-        onDelete={deleteSession}
-        onNew={newChat}
-        onSelect={selectSession}
-        runningId={runningId}
-        sessions={sessions ?? []}
-      />
+      {sessions === null ? (
+        <div className="session-list card">
+          <Loading label="Loading sessions…" />
+        </div>
+      ) : (
+        <SessionList
+          activeId={activeId}
+          onDelete={deleteSession}
+          onNew={newChat}
+          onSelect={selectSession}
+          runningId={runningId}
+          sessions={sessions}
+        />
+      )}
 
       <section className="chat card">
         {error && <ErrorBanner message={error} />}
         <div className="chat-scroll">
           {!hasChat && (
             <div className="chat-welcome">
+              <div className="welcome-icon">
+                <Icon name="sparkles" size={32} />
+              </div>
               <h2>AI Assistant</h2>
               <p className="muted">
-                Ask anything about your stored resumes — for example:
+                Ask anything about your stored resumes. The assistant writes and
+                runs Python in a sandboxed Docker container and can install
+                packages it needs.
               </p>
-              <ul className="muted chat-samples">
-                <li>Pick out candidates that have "python" in their resume</li>
-                <li>Which candidates have 5+ years of experience with AWS?</li>
-                <li>
-                  Compare the skill sets of the top-ranked candidates for J-1
-                </li>
-              </ul>
+              <div className="chat-samples">
+                {SAMPLE_PROMPTS.map((prompt) => (
+                  <button
+                    key={prompt}
+                    className="btn sample-prompt"
+                    type="button"
+                    onClick={() => {
+                      setInput(prompt)
+                      textareaRef.current?.focus()
+                    }}
+                  >
+                    <Icon name="lightbulb" size={14} />
+                    {prompt}
+                  </button>
+                ))}
+              </div>
               <p className="muted small">
-                The assistant writes and runs Python in a Docker sandbox and
-                can install packages it needs. You can watch its steps, docker
-                logs, and files in the side panel.
+                Watch its steps, Docker logs, and workspace files in the side
+                panel.
               </p>
             </div>
           )}
@@ -258,6 +294,7 @@ export function Assistant() {
               <ChatMessage
                 key={`m-${item.message.id}-${index}`}
                 content={item.message.content}
+                createdAt={item.message.created_at}
                 role={item.message.role}
               />
             ) : (
@@ -273,36 +310,44 @@ export function Assistant() {
         </div>
         <form className="chat-composer" onSubmit={submit}>
           <textarea
+            ref={textareaRef}
             disabled={running}
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={onKeyDown}
             placeholder={
               running
                 ? "The assistant is working…"
-                : "Ask about your resumes… (Enter to send, Shift+Enter for a new line)"
+                : "Ask about your resumes…"
             }
-            rows={2}
+            rows={1}
             value={input}
           />
           <div className="chat-composer-actions">
             {hasChat && (
               <button
-                className="btn btn-small"
+                className="btn btn-small btn-icon"
                 onClick={() => setDrawerOpen((open) => !open)}
+                title={drawerOpen ? "Hide side panel" : "Show side panel"}
                 type="button"
               >
-                {drawerOpen ? "Hide panel" : "Show panel"}
+                <Icon name="terminal" size={14} />
+                {drawerOpen ? "Hide" : "Panel"}
               </button>
             )}
             <button
-              className="btn btn-primary"
+              className="btn btn-primary btn-icon"
               disabled={running || !input.trim()}
+              title="Send message"
               type="submit"
             >
+              <Icon name="send" size={16} />
               {running ? "Working…" : "Send"}
             </button>
           </div>
         </form>
+        <div className="chat-hint muted small">
+          Enter to send · Shift+Enter for a new line
+        </div>
       </section>
 
       {hasChat && drawerOpen && activeId && (
