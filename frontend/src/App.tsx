@@ -2,18 +2,20 @@ import { useCallback, useEffect, useState } from "react"
 import { api, type StoredJob } from "./api"
 import { ErrorBanner } from "./components/ErrorBanner"
 import { Loading } from "./components/Loading"
+import { Assistant } from "./screens/Assistant"
 import { History } from "./screens/History"
 import { Jobs } from "./screens/Jobs"
 import { Rank } from "./screens/Rank"
 import { Search } from "./screens/Search"
 
-type Tab = "jobs" | "rank" | "search" | "history"
+type Tab = "jobs" | "rank" | "search" | "history" | "assistant"
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "jobs", label: "Jobs" },
   { id: "rank", label: "Rank resume" },
   { id: "search", label: "Search" },
   { id: "history", label: "Score history" },
+  { id: "assistant", label: "AI Assistant" },
 ]
 
 export default function App() {
@@ -70,7 +72,9 @@ export default function App() {
       </header>
       <main className="container">
         {jobsError && <ErrorBanner message={jobsError} />}
-        {loadingJobs ? (
+        {tab === "assistant" ? (
+          <Assistant />
+        ) : loadingJobs ? (
           <Loading label="Loading jobs…" />
         ) : (
           <>

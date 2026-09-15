@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# agent-run <script> — run a /workspace-relative Python script inside the
+# sandbox. Uses the session venv when one exists, mirrors all output into
+# /workspace/activity.log (which the container's main process tails, so the
+# run shows up in `docker logs`), and propagates the script's exit code.
+# AGENT_RUN_TIMEOUT (seconds, set by the API per exec) hard-kills runaway
+# scripts; exit code 137 means the script was killed on timeout.
+set -u
+
+PY=python3
+if [ -x /workspace/.venv/bin/python ]; then
+    PY=/workspace/.venv/bin/python
+fi
+
+cd /workspace
+timeout --signal=KILL "${AGENT_RUN_TIMEOUT:-120}" "$PY" -u "$1" 2>&1 | tee -a /workspace/activity.log
+exit "${PIPESTATUS[0]}"

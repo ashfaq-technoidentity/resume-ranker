@@ -107,3 +107,87 @@ class JobScoreRecord(BaseModel):
     average_similarity: float
     model: str | None = None
     updated_at: str
+
+
+class AgentSessionRecord(BaseModel):
+    """One AI-assistant chat session (each owns a Docker sandbox)."""
+
+    id: str
+    title: str
+    sandbox_status: str
+    sandbox_container_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentMessageRecord(BaseModel):
+    """One chat message: the user's question or the assistant's final answer."""
+
+    id: int
+    session_id: str
+    run_id: str | None = None
+    role: str
+    content: str
+    created_at: datetime
+
+
+class AgentEventRecord(BaseModel):
+    """One append-only agent trace event (thought, action, observation, ...)."""
+
+    id: int
+    session_id: str
+    run_id: str | None = None
+    seq: int
+    type: str
+    data: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
+class AgentSessionDetail(BaseModel):
+    """Session with its chat messages and full event trace, for replay."""
+
+    session: AgentSessionRecord
+    messages: list[AgentMessageRecord] = Field(default_factory=list)
+    events: list[AgentEventRecord] = Field(default_factory=list)
+
+
+class AgentChatRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=8000)
+
+
+class AgentSessionRename(BaseModel):
+    title: str = Field(min_length=1, max_length=80)
+
+
+class SandboxStatus(BaseModel):
+    """State of a session's Docker sandbox container."""
+
+    container_id: str | None = None
+    name: str | None = None
+    image: str | None = None
+    status: str | None = None
+    running: bool = False
+    started_at: str | None = None
+    workspace_volume: str | None = None
+    mem_usage: str | None = None
+    cpu_percent: float | None = None
+
+
+class SandboxFileEntry(BaseModel):
+    """One entry of a sandbox directory listing."""
+
+    name: str
+    path: str
+    size: int
+    is_dir: bool
+    mtime: float | None = None
+
+
+class SandboxFileContent(BaseModel):
+    """Contents of one sandbox file (text, size-capped)."""
+
+    path: str
+    size: int
+    truncated: bool = False
+    binary: bool = False
+    content: str

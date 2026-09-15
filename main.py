@@ -1,3 +1,4 @@
+import asyncio
 import os
 import shutil
 import tempfile
@@ -17,6 +18,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+import agent_api
 import jobs_db
 from models import (
     JobDescription,
@@ -31,6 +33,28 @@ from models import (
 _RESUME_UPLOAD_EXTENSIONS = (".pdf", ".docx")
 
 
+async def _sandbox_housekeeping(engine) -> None:
+    """Best-effort sandbox hygiene: sweep orphans once, then stop idle ones.
+
+    Retries every minute, so a Docker daemon that comes up after the API is
+    still picked up; a disabled or unreachable sandbox is a silent no-op.
+    """
+    import agent_db
+    import sandbox
+
+    swept = False
+    while True:
+        try:
+            manager = sandbox.get_sandbox_manager()
+            if not swept:
+                swept = True
+                manager.sweep_orphans(agent_db.list_session_ids(engine))
+            manager.reap_idle()
+        except Exception:
+            pass  # sandbox disabled / docker down — try again next tick
+        await asyncio.sleep(60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -41,7 +65,12 @@ async def lifespan(app: FastAPI):
         pass  # python-dotenv is a local-dev convenience; containers inject env vars
     app.state.engine = jobs_db.get_engine()
     jobs_db.init_db(app.state.engine)
+    import agent_db
+
+    agent_db.init_db(app.state.engine)
+    housekeeping = asyncio.create_task(_sandbox_housekeeping(app.state.engine))
     yield
+    housekeeping.cancel()
     app.state.engine.dispose()
 
 
@@ -67,6 +96,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# AI assistant (chat + Docker sandbox observability); degrades to 503s when
+# docker or the agent modules are unavailable, like the resume workflow
+app.include_router(agent_api.router)
 
 
 @app.post(

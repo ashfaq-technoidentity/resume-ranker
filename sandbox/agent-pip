@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# agent-pip <packages...> — install PyPI packages into the session venv at
+# /workspace/.venv (created on first use; it lives on the workspace volume,
+# so installs persist until the sandbox is reset). Output is mirrored into
+# /workspace/activity.log so installs show up in `docker logs`.
+set -u
+
+if [ ! -d /workspace/.venv ]; then
+    python3 -m venv /workspace/.venv 2>&1 | tee -a /workspace/activity.log
+    if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+        exit 1
+    fi
+fi
+
+/workspace/.venv/bin/pip install --no-cache-dir "$@" 2>&1 | tee -a /workspace/activity.log
+exit "${PIPESTATUS[0]}"

@@ -41,9 +41,25 @@ WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /opt/nltk_data /opt/nltk_data
 COPY main.py jobs_db.py models.py db.py parse.py keyword_search.py \
-    semantic_match.py embedding_provider.py file_preview.py ./
+    semantic_match.py embedding_provider.py file_preview.py \
+    agent_db.py agent_llm.py agent.py agent_api.py sandbox.py ./
 USER app
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+HEALTHCHECK --interval=300s --timeout=5s --start-period=30s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"
 CMD ["sh", "-c", "python -m jobs_db && exec uvicorn main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-1}"]
+
+# ---- sandbox: minimal per-session container the agent runs code in ----
+# The api creates these at runtime (docker build --target sandbox). Nothing is
+# preinstalled beyond pip — the agent installs what it needs into a venv on
+# the /workspace volume via agent-pip. agent-run/agent-pip tee their output
+# into /workspace/activity.log, which the main process tails so everything
+# the agent does shows up in `docker logs`.
+FROM python:3.12-slim-bookworm AS sandbox
+RUN groupadd --system sandbox \
+    && useradd --system --gid sandbox --home-dir /workspace sandbox
+COPY sandbox/agent-run sandbox/agent-pip /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/agent-run /usr/local/bin/agent-pip
+USER sandbox
+WORKDIR /workspace
+CMD ["sh", "-c", "touch /workspace/activity.log && exec tail -F /workspace/activity.log"]

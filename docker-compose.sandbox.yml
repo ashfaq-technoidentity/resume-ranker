@@ -1,0 +1,34 @@
+# Opt-in override that enables the AI assistant's Docker sandboxes when the
+# backend itself runs in docker compose:
+#
+#   DOCKER_GID=$(getent group docker | cut -d: -f3) >> .env  # once
+#   docker compose -f docker-compose.yml -f docker-compose.sandbox.yml \
+#       --profile sandbox up --build -d
+#
+# The base compose file stays untouched: without this override no docker
+# socket is exposed to the api. With it, the api can create sandbox
+# containers (equivalent to host-root access — only use this on machines
+# where that is acceptable) and mounts the resumes volume read-only into
+# every sandbox it creates.
+services:
+  api:
+    environment:
+      SANDBOX_ENABLED: "1"
+      SANDBOX_RESUMES_MOUNT: "volume:resumes:/data/resumes:ro"
+    # the api runs as non-root 'app'; add the host docker group so it can
+    # open the mounted docker socket
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID in .env (getent group docker | cut -d: -f3)}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # build target for the sandbox image; never runs (profile-gated, exits
+  # immediately) — it exists so `docker compose --profile sandbox build`
+  # produces resume-ranker-sandbox
+  sandbox-image:
+    build:
+      context: .
+      target: sandbox
+    image: resume-ranker-sandbox
+    profiles: ["sandbox"]
+    entrypoint: ["true"]
