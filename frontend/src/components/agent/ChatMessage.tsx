@@ -1,30 +1,30 @@
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { resumeFileUrl } from "../../api"
+import { BASE_URL } from "../../api"
 import { CodeBlock } from "./CodeBlock"
 import { Icon } from "./Icon"
 import { formatAbsolute, formatRelative } from "./time"
 
+/** ReactMarkdown sanitises non-HTTP URL schemes, so replace the agent's
+ *  resume://ID links with real API URLs before markdown parsing. */
+function resolveResumeLinks(content: string): string {
+  return content.replace(/resume:\/\/(\d+)/g, `${BASE_URL}/resumes/$1/file`)
+}
+
+function isResumeFileUrl(href: string | undefined): boolean {
+  if (!href) return false
+  return href.startsWith(`${BASE_URL}/resumes/`) && href.endsWith("/file")
+}
+
 const markdownComponents: Components = {
   a: ({ href, children }) => {
-    if (typeof href === "string" && href.startsWith("resume://")) {
-      const id = Number(href.slice("resume://".length))
-      if (Number.isInteger(id) && id > 0) {
-        return (
-          <a
-            className="resume-link"
-            href={resumeFileUrl(id)}
-            target="_blank"
-            rel="noreferrer"
-          >
-            {children}
-            <Icon name="external" size={12} className="link-icon" />
-          </a>
-        )
-      }
-    }
     return (
-      <a href={href} target="_blank" rel="noreferrer">
+      <a
+        className={isResumeFileUrl(href) ? "resume-link" : ""}
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+      >
         {children}
         <Icon name="external" size={12} className="link-icon" />
       </a>
@@ -40,6 +40,7 @@ interface ChatMessageProps {
 }
 
 export function ChatMessage({ role, content, createdAt }: ChatMessageProps) {
+  const renderedContent = role === "assistant" ? resolveResumeLinks(content) : content
   const isAssistant = role === "assistant"
   const timeText = createdAt ? formatAbsolute(createdAt) : undefined
   const timeAgo = createdAt ? formatRelative(createdAt) : undefined
@@ -65,7 +66,7 @@ export function ChatMessage({ role, content, createdAt }: ChatMessageProps) {
                 remarkPlugins={[remarkGfm]}
                 components={markdownComponents}
               >
-                {content}
+                {renderedContent}
               </ReactMarkdown>
             </div>
           ) : (
