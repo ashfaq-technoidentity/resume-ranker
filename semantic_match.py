@@ -118,6 +118,80 @@ def semantic_similarity(
     return result
 
 
+def batch_semantic_similarity(
+    provider: EmbeddingProvider,
+    records: list[dict],
+    jd_skills: str,
+    jd_responsibilities: str,
+) -> list[dict]:
+    """Match multiple stored resume records against a JD using batched embeddings.
+
+    Extracts (candidate_skills, candidate_experience) for each candidate, collects
+    all unique non-empty texts to embed in a single provider call, and calculates
+    cosine similarities.
+    """
+    if not records:
+        return []
+
+    candidate_chunks: list[tuple[str, str]] = [
+        build_candidate_chunks(record) for record in records
+    ]
+
+    has_jd_skills = bool(jd_skills and jd_skills.strip())
+    has_jd_resp = bool(jd_responsibilities and jd_responsibilities.strip())
+
+    needed_texts: list[str] = []
+    if has_jd_skills:
+        needed_texts.append(jd_skills)
+    if has_jd_resp:
+        needed_texts.append(jd_responsibilities)
+
+    for c_skills, c_exp in candidate_chunks:
+        if has_jd_skills and c_skills and c_skills.strip():
+            needed_texts.append(c_skills)
+        if has_jd_resp and c_exp and c_exp.strip():
+            needed_texts.append(c_exp)
+
+    unique_texts: list[str] = list(dict.fromkeys(needed_texts))
+    vectors = provider.embed_texts(unique_texts) if unique_texts else []
+    vector_map: dict[str, list[float]] = dict(zip(unique_texts, vectors))
+
+    jd_skills_vec = vector_map.get(jd_skills)
+    jd_resp_vec = vector_map.get(jd_responsibilities)
+    model = getattr(provider, "model", "unknown")
+
+    results: list[dict] = []
+    for record, (c_skills, c_exp) in zip(records, candidate_chunks):
+        c_skills_vec = vector_map.get(c_skills) if has_jd_skills else None
+        c_exp_vec = vector_map.get(c_exp) if has_jd_resp else None
+
+        skills_sim = (
+            cosine_similarity(c_skills_vec, jd_skills_vec)
+            if (c_skills_vec is not None and jd_skills_vec is not None)
+            else 0.0
+        )
+        exp_sim = (
+            cosine_similarity(c_exp_vec, jd_resp_vec)
+            if (c_exp_vec is not None and jd_resp_vec is not None)
+            else 0.0
+        )
+        avg_sim = (skills_sim + exp_sim) / 2.0
+
+        results.append(
+            {
+                "resume_id": record["id"],
+                "candidate_name": record.get("name") or f"candidate {record['id']}",
+                "candidate_skills": c_skills,
+                "candidate_experience": c_exp,
+                "skills_similarity": skills_sim,
+                "experience_similarity": exp_sim,
+                "average_similarity": avg_sim,
+                "model": model,
+            }
+        )
+    return results
+
+
 def _preview(text: str, width: int = 100) -> str:
     return " ".join(text.split())[:width] or "(empty)"
 

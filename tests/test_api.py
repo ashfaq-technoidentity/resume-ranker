@@ -249,6 +249,47 @@ def test_delete_job_not_found(client):
     assert response.status_code == 404
 
 
+def test_job_with_slash_in_id_is_addressable(client):
+    client.post("/jobs", json={"job_id": "ai/ml-tcc", "description": "AI/ML role"})
+
+    # uvicorn and the test client both unquote %2F to '/' before routing,
+    # so both spellings must resolve to the same stored job
+    encoded = client.get("/jobs/ai%2Fml-tcc")
+    literal = client.get("/jobs/ai/ml-tcc")
+
+    assert encoded.status_code == 200
+    assert encoded.json()["job_id"] == "ai/ml-tcc"
+    assert literal.status_code == 200
+    assert literal.json()["job_id"] == "ai/ml-tcc"
+
+
+def test_update_and_delete_job_with_slash_in_id(client):
+    client.post("/jobs", json={"job_id": "ai/ml-tcc", "description": "v1"})
+    updated = client.put("/jobs/ai%2Fml-tcc", json={"description": "v2"})
+    fetched = client.get("/jobs/ai/ml-tcc")
+    deleted = client.delete("/jobs/ai%2Fml-tcc")
+
+    assert updated.status_code == 200
+    assert updated.json()["description"] == "v2"
+    assert fetched.json()["description"] == "v2"
+    assert deleted.status_code == 204
+    assert client.get("/jobs/ai/ml-tcc").status_code == 404
+
+
+def test_job_scores_with_slash_in_job_id(client, resumes_db_path):
+    conn = db.get_connection(resumes_db_path)
+    try:
+        db.save_job_scores(conn, 1, "ai/ml-tcc", 0.5, 0.5, 0.5, "m1")
+        conn.commit()
+    finally:
+        conn.close()
+
+    response = client.get("/jobs/ai%2Fml-tcc/scores")
+
+    assert response.status_code == 200
+    assert [item["resume_id"] for item in response.json()] == [1]
+
+
 def test_store_job_validation_errors(client):
     missing_description = client.post("/jobs", json={"job_id": "J-5"})
     empty_description = client.post("/jobs", json={"job_id": "J-5", "description": ""})
@@ -617,6 +658,213 @@ def test_rank_resume_embedding_failure_bad_gateway(rank_env, monkeypatch):
 
     assert response.status_code == 502
     assert "Similarity calculation failed" in response.json()["detail"]
+
+
+def test_batch_upload_resumes_without_job_stores_all(rank_env, monkeypatch):
+    client, db_path = rank_env
+    files = [
+        ("resume_files", ("alice.pdf", b"%PDF alice resume", "application/pdf")),
+        (
+            "resume_files",
+            (
+                "bob.docx",
+                b"%PDF bob resume",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+        ),
+    ]
+    response = client.post("/resumes/batch", files=files)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 2
+    assert data["succeeded"] == 2
+    assert data["failed"] == 0
+    assert len(data["items"]) == 2
+
+    conn = db.get_connection(db_path)
+    try:
+        records = db.get_all_resumes(conn)
+        assert len(records) == 2
+    finally:
+        conn.close()
+
+    for item in data["items"]:
+        assert item["status"] == "success"
+        assert item["resume_id"] is not None
+        assert item["job_id"] is None
+        assert item["skills_similarity"] is None
+
+
+def test_batch_upload_resumes_with_job_scores_all(rank_env, monkeypatch):
+    client, db_path = rank_env
+    provider = StubEmbeddingProvider(
+        {
+            "Python, Docker": [1.0, 0.0],
+            "python\ndocker": [1.0, 0.0],
+            "Built things at TechnoIdentity": [0.0, 1.0],
+            "build apis": [0.0, 1.0],
+        }
+    )
+    _install_provider(monkeypatch, provider)
+
+    files = [
+        ("resume_files", ("alice.pdf", b"%PDF alice resume", "application/pdf")),
+        ("resume_files", ("bob.pdf", b"%PDF bob resume", "application/pdf")),
+    ]
+    response = client.post("/resumes/batch", files=files, data={"job_id": "J-1"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 2
+    assert data["succeeded"] == 2
+    assert data["failed"] == 0
+
+    for item in data["items"]:
+        assert item["status"] == "success"
+        assert item["job_id"] == "J-1"
+        assert item["skills_similarity"] == pytest.approx(1.0)
+        assert item["experience_similarity"] == pytest.approx(1.0)
+        assert item["average_similarity"] == pytest.approx(1.0)
+
+    conn = db.get_connection(db_path)
+    try:
+        for item in data["items"]:
+            scores = db.get_job_scores(conn, item["resume_id"], "J-1")
+            assert scores is not None
+            assert scores["average_similarity"] == pytest.approx(1.0)
+    finally:
+        conn.close()
+
+
+def test_batch_upload_resumes_partial_failures(rank_env, monkeypatch):
+    client, _ = rank_env
+
+    def parse_with_one_broken(file_path: str) -> ParsedResume:
+        if "corrupt" in file_path:
+            return ParsedResume(
+                file_path=file_path,
+                error="boom: corrupt docx",
+                raw={},
+            )
+        return _fake_parsed_resume(file_path)
+
+    monkeypatch.setattr(parse, "parse_file", parse_with_one_broken)
+
+    files = [
+        ("resume_files", ("valid.pdf", b"%PDF valid", "application/pdf")),
+        ("resume_files", ("unsupported.txt", b"plain text", "text/plain")),
+        ("resume_files", ("empty.pdf", b"", "application/pdf")),
+        (
+            "resume_files",
+            (
+                "corrupt.docx",
+                b"%PDF corrupt",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+        ),
+    ]
+    response = client.post("/resumes/batch", files=files)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 4
+    assert data["succeeded"] == 1
+    assert data["failed"] == 3
+
+    items = {item["file_name"]: item for item in data["items"]}
+    assert items["valid.pdf"]["status"] == "success"
+    assert items["valid.pdf"]["resume_id"] is not None
+
+    assert items["unsupported.txt"]["status"] == "error"
+    assert "Unsupported resume file" in items["unsupported.txt"]["error"]
+
+    assert items["empty.pdf"]["status"] == "error"
+    assert "empty" in items["empty.pdf"]["error"]
+
+    assert items["corrupt.docx"]["status"] == "error"
+    assert "boom: corrupt docx" in items["corrupt.docx"]["error"]
+
+
+def test_batch_upload_empty_files_unprocessable(rank_env):
+    client, _ = rank_env
+    response = client.post("/resumes/batch")
+    assert response.status_code == 422
+
+
+def test_batch_upload_nonexistent_job_404(rank_env):
+    client, _ = rank_env
+    files = [("resume_files", ("valid.pdf", b"%PDF valid", "application/pdf"))]
+    response = client.post(
+        "/resumes/batch", files=files, data={"job_id": "J-DOES-NOT-EXIST"}
+    )
+    assert response.status_code == 404
+
+
+def test_batch_insert_json(rank_env):
+    client, db_path = rank_env
+    payload = {
+        "resumes": [
+            {
+                "file_path": "path1.pdf",
+                "name": "Candidate One",
+                "skills": ["Python", "FastAPI"],
+                "resume_text": "Candidate One Python FastAPI",
+            },
+            {
+                "file_path": "path2.pdf",
+                "name": "Candidate Two",
+                "skills": ["React", "TypeScript"],
+                "resume_text": "Candidate Two React TypeScript",
+            },
+        ]
+    }
+    response = client.post("/resumes/batch-json", json=payload)
+    assert response.status_code == 201
+    data = response.json()
+    assert data["total"] == 2
+    assert len(data["resume_ids"]) == 2
+
+    conn = db.get_connection(db_path)
+    try:
+        r1 = db.get_resume(conn, data["resume_ids"][0])
+        assert r1["name"] == "Candidate One"
+        r2 = db.get_resume(conn, data["resume_ids"][1])
+        assert r2["name"] == "Candidate Two"
+    finally:
+        conn.close()
+
+
+def test_batch_insert_json_empty_unprocessable(rank_env):
+    client, _ = rank_env
+    response = client.post("/resumes/batch-json", json={"resumes": []})
+    assert response.status_code == 422
+
+
+def test_batch_upload_with_real_files(client, tmp_path, monkeypatch):
+    db_path = tmp_path / "resumes.db"
+    monkeypatch.setenv("RESUMES_DB_PATH", str(db_path))
+    pdf_path = "sample_resumes/ashfaq-resume-Aug-2026_tailored_20260825_090723.pdf"
+    docx_path = "sample_resumes/omkar_pathak.docx"
+    with open(pdf_path, "rb") as f1, open(docx_path, "rb") as f2:
+        files = [
+            ("resume_files", ("ashfaq.pdf", f1.read(), "application/pdf")),
+            (
+                "resume_files",
+                (
+                    "omkar.docx",
+                    f2.read(),
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ),
+            ),
+        ]
+    response = client.post("/resumes/batch", files=files)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 2
+    assert data["succeeded"] == 2
+    assert data["failed"] == 0
+    for item in data["items"]:
+        assert item["status"] == "success"
+        assert item["resume_id"] is not None
+        assert len(item["skills"]) > 0
 
 
 def test_rank_resume_stores_scores_in_resume_job_scores(rank_env, monkeypatch):

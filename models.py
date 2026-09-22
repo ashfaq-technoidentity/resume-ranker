@@ -109,6 +109,36 @@ class JobScoreRecord(BaseModel):
     updated_at: str
 
 
+class BatchResumeItem(BaseModel):
+    file_name: str
+    status: str  # "success" or "error"
+    resume_id: int | None = None
+    file_hash: str | None = None
+    name: str | None = None
+    email: str | None = None
+    skills: list[str] = Field(default_factory=list)
+    total_experience: float | None = None
+    error: str | None = None
+    job_id: str | None = None
+    candidate_skills: str | None = None
+    candidate_experience: str | None = None
+    skills_similarity: float | None = None
+    experience_similarity: float | None = None
+    average_similarity: float | None = None
+    model: str | None = None
+
+
+class BatchResumeResponse(BaseModel):
+    total: int
+    succeeded: int
+    failed: int
+    items: list[BatchResumeItem]
+
+
+class BatchInsertJsonRequest(BaseModel):
+    resumes: list[ParsedResume] = Field(min_length=1)
+
+
 class AgentSessionRecord(BaseModel):
     """One AI-assistant chat session (each owns a Docker sandbox)."""
 

@@ -7,6 +7,7 @@
 - Parse resumes: `python parse.py <folder>`
 - Semantic match demo (needs `OPENROUTER_API_KEY` in `.env`): `python semantic_match.py [--candidate-id N]`
 - Rank one resume (main workflow API, needs `OPENROUTER_API_KEY` in `.env`): `curl -F 'resume_file=@resume.pdf' -F 'job_id=J-1' localhost:8000/resumes/rank` (criteria come from the stored job; create it first via `POST /jobs`)
+- Batch upload resumes (FE tab "Batch upload" or API, parses in parallel + optional batch job scoring): `curl -F 'resume_files=@r1.pdf' -F 'resume_files=@r2.docx' [-F 'job_id=J-1'] localhost:8000/resumes/batch`
 - Tests: `python -m pytest` (sandbox docker integration tests need the sandbox image built + `SANDBOX_INTEGRATION=1`)
 - AI assistant (needs the sandbox image + `OPENROUTER_API_KEY`): build the image once with `docker build --target sandbox -t resume-ranker-sandbox .`, then chat via the frontend's "AI Assistant" tab or `curl -N -X POST -H 'Content-Type: application/json' -d '{"content":"pick out candidates that have python in their resume"}' localhost:8000/agent/sessions/<id>/chat` (create the session with `curl -X POST localhost:8000/agent/sessions`); the answer streams as SSE agent events
 - Frontend UI (React + Vite in `frontend/`, needs the dev API running): `cd frontend && npm install && npm run dev` → http://localhost:5173 (lint: `npm run lint`; prod build: `npm run build`)
@@ -17,7 +18,9 @@
 - Locally, the `resumes`, `job_descriptions`, and `agent_*` tables all live in `resumes.db`.
 - Embeddings go through `embedding_provider.py`: `EMBEDDING_PROVIDER` (default `openrouter`) + `EMBEDDING_MODEL` (default `openai/text-embedding-3-small`); swap providers by adding a class and registering it in `get_embedding_provider()`.
 - `POST /resumes/rank` parses an uploaded resume, stores text/details/file in `RESUMES_DB_PATH` (keyed by file hash, re-uploads upsert), and returns skills/experience/average similarity.
-- Scores from `/resumes/rank` are stored in `resume_job_scores` (in `RESUMES_DB_PATH`), keyed by `(resume_id, job_id)` — re-ranking upserts; `job_id` is a soft reference to `job_descriptions` since jobs may live in a different database.
+- `POST /resumes/batch` parses multiple uploaded resumes in parallel via `ThreadPoolExecutor`, stores each in `RESUMES_DB_PATH` in a single transaction, and optionally scores them against a job with batched embeddings. Returns summary and per-item statuses.
+- `POST /resumes/batch-json` inserts pre-parsed resumes into `RESUMES_DB_PATH` via JSON payload.
+- Scores from `/resumes/rank` and `/resumes/batch` are stored in `resume_job_scores` (in `RESUMES_DB_PATH`), keyed by `(resume_id, job_id)` — re-ranking upserts; `job_id` is a soft reference to `job_descriptions` since jobs may live in a different database.
 - `GET /jobs/{job_id}/scores` lists stored rankings for a job (best average first, candidate details joined from `resumes`); unknown job ids return `[]` (soft reference).
 - `GET /resumes/{resume_id}/file` serves a stored resume for in-browser preview (`file_preview.py`): PDFs inline, DOCX converted to PDF via LibreOffice headless (`soffice`; locally `sudo apt install libreoffice-writer`, bundled in the Docker image), other types download. Converted PDFs are cached in `RESUME_PREVIEW_CACHE_DIR` (local default `resume_previews/`, gitignored; `/data/previews` volume in Docker) keyed by file hash; module lazy-imported like `db` so pared-down installs still boot.
 - The API sends CORS headers (default allowlist: the Vite dev origins; override with `CORS_ORIGINS`, comma-separated). The frontend's API base URL is `VITE_API_URL` (default `http://localhost:8000`, see `frontend/.env.example`).

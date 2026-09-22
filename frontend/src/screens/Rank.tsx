@@ -6,9 +6,10 @@ import { ScoreBar } from "../components/ScoreBar"
 
 interface RankProps {
   jobs: StoredJob[]
+  onSwitchToBatch?: () => void
 }
 
-export function Rank({ jobs }: RankProps) {
+export function Rank({ jobs, onSwitchToBatch }: RankProps) {
   const [jobId, setJobId] = useState("")
   const [file, setFile] = useState<File | null>(null)
   const [result, setResult] = useState<RankResult | null>(null)
@@ -88,6 +89,16 @@ export function Rank({ jobs }: RankProps) {
           >
             {busy ? "Ranking…" : "Rank resume"}
           </button>
+          {onSwitchToBatch && (
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={onSwitchToBatch}
+              title="Upload multiple resumes at once"
+            >
+              Batch upload multiple…
+            </button>
+          )}
         </div>
         <p className="muted small">
           The resume is parsed, stored, and scored against the job's skills and

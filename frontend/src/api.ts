@@ -35,6 +35,32 @@ export interface RankResult {
   average_similarity: number
 }
 
+export interface BatchResumeItem {
+  file_name: string
+  status: "success" | "error"
+  resume_id: number | null
+  file_hash: string | null
+  name: string | null
+  email: string | null
+  skills: string[]
+  total_experience: number | null
+  error: string | null
+  job_id: string | null
+  candidate_skills: string | null
+  candidate_experience: string | null
+  skills_similarity: number | null
+  experience_similarity: number | null
+  average_similarity: number | null
+  model: string | null
+}
+
+export interface BatchResumeResponse {
+  total: number
+  succeeded: number
+  failed: number
+  items: BatchResumeItem[]
+}
+
 export interface KeywordMatch {
   keyword: string
   count: number
@@ -179,6 +205,27 @@ export const api = {
     form.append("job_id", jobId)
     return request<RankResult>("/resumes/rank", { method: "POST", body: form })
   },
+
+  batchUploadResumes: (files: File[], jobId?: string) => {
+    const form = new FormData()
+    for (const file of files) {
+      form.append("resume_files", file)
+    }
+    if (jobId && jobId.trim()) {
+      form.append("job_id", jobId.trim())
+    }
+    return request<BatchResumeResponse>("/resumes/batch", {
+      method: "POST",
+      body: form,
+    })
+  },
+
+  batchInsertResumesJson: (resumes: Record<string, unknown>[]) =>
+    request<{ total: number; resume_ids: number[] }>("/resumes/batch-json", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ resumes }),
+    }),
 
   searchResumes: (keywords: string[]) =>
     request<SearchResult[]>("/resumes/search", {
